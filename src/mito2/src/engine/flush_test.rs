@@ -161,6 +161,7 @@ async fn test_flush_engine() {
 
 #[tokio::test]
 async fn test_write_stall() {
+    common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new();
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(StallListener::default());

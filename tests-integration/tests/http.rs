@@ -1189,6 +1189,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "content_cache_size =",
         "name =",
         "recovery_parallelism =",
+        "max_background_index_builds =",
         "max_background_flushes =",
         "max_background_compactions =",
         "max_background_purges =",

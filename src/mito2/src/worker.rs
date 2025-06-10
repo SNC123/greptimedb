@@ -36,7 +36,7 @@ use std::time::Duration;
 use common_base::Plugins;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
 use prometheus::IntGauge;
@@ -68,6 +68,7 @@ use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::FileId;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::IndexBuildScheduler;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
 use crate::worker::handle_manifest::RegionEditQueues;
@@ -158,6 +159,7 @@ impl WorkerGroup {
         let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
             .await?
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
+        let index_build_job_pool = Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         // We use another scheduler to avoid purge jobs blocking other jobs.
@@ -191,6 +193,7 @@ impl WorkerGroup {
                     log_store: log_store.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
+                    index_build_job_pool: index_build_job_pool.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -295,6 +298,7 @@ impl WorkerGroup {
                     .with_notifier(flush_sender.clone()),
             )
         });
+        let index_build_job_pool = Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
@@ -331,6 +335,7 @@ impl WorkerGroup {
                     log_store: log_store.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
+                    index_build_job_pool: index_build_job_pool.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -408,6 +413,7 @@ struct WorkerStarter<S> {
     object_store_manager: ObjectStoreManagerRef,
     write_buffer_manager: WriteBufferManagerRef,
     compact_job_pool: SchedulerRef,
+    index_build_job_pool: SchedulerRef,
     flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
     listener: WorkerListener,
@@ -450,6 +456,7 @@ impl<S: LogStore> WorkerStarter<S> {
             ),
             purge_scheduler: self.purge_scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
+            index_build_scheduler: IndexBuildScheduler::new(self.index_build_job_pool),
             flush_scheduler: FlushScheduler::new(self.flush_job_pool),
             compaction_scheduler: CompactionScheduler::new(
                 self.compact_job_pool,
@@ -683,6 +690,8 @@ struct RegionWorkerLoop<S> {
     purge_scheduler: SchedulerRef,
     /// Engine write buffer manager.
     write_buffer_manager: WriteBufferManagerRef,
+    /// Scheduler for index build task.
+    index_build_scheduler : IndexBuildScheduler,
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,
     /// Scheduler for compaction tasks.
@@ -830,6 +839,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         general_requests: &mut Vec<WorkerRequest>,
         bulk_requests: &mut Vec<SenderBulkRequest>,
     ) {
+        debug!("------------------");
+        debug!("write requests = {:?}", write_requests);
+        debug!("general requests = {:?}", general_requests);
+        debug!("------------------");
         for worker_req in general_requests.drain(..) {
             match worker_req {
                 WorkerRequest::Write(_) | WorkerRequest::Ddl(_) => {

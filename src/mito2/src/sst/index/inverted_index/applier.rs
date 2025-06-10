@@ -17,7 +17,7 @@ pub mod builder;
 use std::sync::Arc;
 
 use common_base::range_read::RangeReader;
-use common_telemetry::warn;
+use common_telemetry::{warn,debug};
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
@@ -117,6 +117,7 @@ impl InvertedIndexApplier {
 
     /// Applies predicates to the provided SST file id and returns the relevant row group ids
     pub async fn apply(&self, file_id: FileId, file_size_hint: Option<u64>) -> Result<ApplyOutput> {
+        debug!("index apply to file {:?}", file_id);
         let _timer = INDEX_APPLY_ELAPSED
             .with_label_values(&[TYPE_INVERTED_INDEX])
             .start_timer();

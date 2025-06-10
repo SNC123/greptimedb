@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use common_telemetry::debug;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::manifest::ManifestVersion;
@@ -129,9 +130,11 @@ impl RegionManifestBuilder {
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
         self.manifest_version = manifest_version;
         for file in edit.files_to_add {
+            debug!("insert file = {:?}", file);
             self.files.insert(file.file_id, file);
         }
         for file in edit.files_to_remove {
+            debug!("remove file = {:?}", file);
             self.files.remove(&file.file_id);
         }
         if let Some(flushed_entry_id) = edit.flushed_entry_id {

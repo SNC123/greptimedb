@@ -101,7 +101,8 @@ mod tests {
     use super::*;
     use crate::access_layer::FilePathProvider;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
-    use crate::sst::index::{Indexer, IndexerBuilder};
+    use crate::schedule::scheduler::LocalScheduler;
+    use crate::sst::index::{IndexBuildScheduler, Indexer, IndexerBuilder};
     use crate::sst::parquet::format::WriteFormat;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::sst::parquet::writer::ParquetWriter;
@@ -128,7 +129,8 @@ mod tests {
             location::sst_file_path(FILE_DIR, self.file_id)
         }
     }
-
+    
+    #[derive(Clone)]
     struct NoopIndexBuilder;
 
     #[async_trait::async_trait]
@@ -143,6 +145,9 @@ mod tests {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
+        let mock_index_build_scheduler = IndexBuildScheduler::new(
+            Arc::new(LocalScheduler::new(5))
+        );
         let file_path = FixedPathProvider {
             file_id: handle.file_id(),
         };
@@ -162,12 +167,13 @@ mod tests {
             object_store.clone(),
             metadata.clone(),
             NoopIndexBuilder,
+            mock_index_build_scheduler,
             file_path,
         )
         .await;
 
         let info = writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, None)
             .await
             .unwrap()
             .remove(0);
@@ -201,6 +207,9 @@ mod tests {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
+        let mock_index_build_scheduler = IndexBuildScheduler::new(
+            Arc::new(LocalScheduler::new(5))
+        );
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -217,6 +226,7 @@ mod tests {
             object_store.clone(),
             metadata.clone(),
             NoopIndexBuilder,
+            mock_index_build_scheduler,
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
@@ -224,7 +234,7 @@ mod tests {
         .await;
 
         writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, None)
             .await
             .unwrap()
             .remove(0);
@@ -271,6 +281,9 @@ mod tests {
         let mut env = crate::test_util::TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
+        let mock_index_build_scheduler = IndexBuildScheduler::new(
+            Arc::new(LocalScheduler::new(5))
+        );
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -288,6 +301,7 @@ mod tests {
             object_store.clone(),
             metadata.clone(),
             NoopIndexBuilder,
+            mock_index_build_scheduler,
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
@@ -295,7 +309,7 @@ mod tests {
         .await;
 
         let sst_info = writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, None)
             .await
             .unwrap()
             .remove(0);
@@ -314,6 +328,9 @@ mod tests {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
+        let mock_index_build_scheduler = IndexBuildScheduler::new(
+            Arc::new(LocalScheduler::new(5))
+        );
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -330,13 +347,14 @@ mod tests {
             object_store.clone(),
             metadata.clone(),
             NoopIndexBuilder,
+            mock_index_build_scheduler,
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
         )
         .await;
         writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, None)
             .await
             .unwrap()
             .remove(0);
@@ -366,6 +384,9 @@ mod tests {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
+        let mock_index_build_scheduler = IndexBuildScheduler::new(
+            Arc::new(LocalScheduler::new(5))
+        );
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "z"], 0, 0),
@@ -382,13 +403,14 @@ mod tests {
             object_store.clone(),
             metadata.clone(),
             NoopIndexBuilder,
+            mock_index_build_scheduler,
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
         )
         .await;
         writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, None)
             .await
             .unwrap()
             .remove(0);
@@ -403,6 +425,9 @@ mod tests {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
+        let mock_index_build_scheduler = IndexBuildScheduler::new(
+            Arc::new(LocalScheduler::new(5))
+        );
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -419,6 +444,7 @@ mod tests {
             object_store.clone(),
             metadata.clone(),
             NoopIndexBuilder,
+            mock_index_build_scheduler,
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
@@ -426,7 +452,7 @@ mod tests {
         .await;
 
         writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, None)
             .await
             .unwrap()
             .remove(0);

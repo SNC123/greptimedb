@@ -46,6 +46,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::FileMeta;
+use crate::sst::index::IndexBuildScheduler;
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
 
@@ -231,7 +232,7 @@ pub(crate) struct RegionFlushTask {
     pub(crate) row_group_size: Option<usize>,
     pub(crate) cache_manager: CacheManagerRef,
     pub(crate) manifest_ctx: ManifestContextRef,
-
+    pub(crate) index_build_scheduler: IndexBuildScheduler,
     /// Index options for the region.
     pub(crate) index_options: IndexOptions,
 }
@@ -366,8 +367,12 @@ impl RegionFlushTask {
 
             let ssts_written = self
                 .access_layer
-                .write_sst(write_request, &write_opts)
-                .await?;
+                .write_sst(
+                    write_request, 
+                    &write_opts, 
+                    self.index_build_scheduler.clone(),
+                    Some(self.request_sender.clone()),
+                ).await?;
             if ssts_written.is_empty() {
                 // No data written.
                 continue;
@@ -424,6 +429,7 @@ impl RegionFlushTask {
         // add a cleanup job to remove them later.
         let version = self
             .manifest_ctx
+            /* ==== 当前索引元数据通过manifest统一更新 ==== */
             .update_manifest(expected_state, action_list)
             .await?;
         info!(
@@ -790,6 +796,7 @@ mod tests {
     use super::*;
     use crate::cache::CacheManager;
     use crate::memtable::time_series::TimeSeriesMemtableBuilder;
+    use crate::schedule::scheduler::LocalScheduler;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{write_rows_to_version, VersionControlBuilder};
 
@@ -863,8 +870,11 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_flush_scheduler();
+        
         let builder = VersionControlBuilder::new();
-
+        let mock_index_build_scheduler = IndexBuildScheduler::new(
+            Arc::new(LocalScheduler::new(5))
+        );
         let version_control = Arc::new(builder.build());
         let (output_tx, output_rx) = oneshot::channel();
         let mut task = RegionFlushTask {
@@ -877,6 +887,7 @@ mod tests {
             engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,
             cache_manager: Arc::new(CacheManager::default()),
+            index_build_scheduler: mock_index_build_scheduler,
             manifest_ctx: env
                 .mock_manifest_context(version_control.current().version.metadata.clone())
                 .await,
@@ -898,6 +909,9 @@ mod tests {
         let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_flush_scheduler();
+        let mock_index_build_scheduler = IndexBuildScheduler::new(
+            Arc::new(LocalScheduler::new(5))
+        );
         let mut builder = VersionControlBuilder::new();
         // Overwrites the empty memtable builder.
         builder.set_memtable_builder(Arc::new(TimeSeriesMemtableBuilder::default()));
@@ -920,6 +934,7 @@ mod tests {
                 engine_config: Arc::new(MitoConfig::default()),
                 row_group_size: None,
                 cache_manager: Arc::new(CacheManager::default()),
+                index_build_scheduler: mock_index_build_scheduler.clone(),
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
             })

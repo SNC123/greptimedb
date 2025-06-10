@@ -1080,6 +1080,7 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
 
 /// Put rows into the engine.
 pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
+    // engine.wait_region_writable(region_id).await;
     let num_rows = rows.rows.len();
     let result = engine
         .handle_request(

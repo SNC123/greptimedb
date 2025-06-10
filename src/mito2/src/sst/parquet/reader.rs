@@ -183,6 +183,7 @@ impl ParquetReaderBuilder {
         &self,
         metrics: &mut ReaderMetrics,
     ) -> Result<(FileRangeContext, RowGroupSelection)> {
+        debug!("enter build reader input");
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.file_dir);
@@ -446,14 +447,20 @@ impl ParquetReaderBuilder {
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
     ) -> bool {
+        debug!("enter prune row groups, size = {}",row_group_size);
+        debug!("file handle = {:?}", self.file_handle);
+        debug!("file dir = {:?}", self.file_dir);
+        debug!("expected metadata = {:?}", self.expected_metadata);
         let Some(index_applier) = &self.inverted_index_applier else {
             return false;
         };
-
+        debug!("got applier");
+        debug!("meta = {:?}", self.file_handle.meta_ref());
         if !self.file_handle.meta_ref().inverted_index_available() {
             return false;
         }
         let file_size_hint = self.file_handle.meta_ref().index_file_size();
+        debug!("file size hint = {}", file_size_hint);
         let apply_output = match index_applier
             .apply(self.file_handle.file_id(), Some(file_size_hint))
             .await

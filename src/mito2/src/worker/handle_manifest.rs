@@ -18,10 +18,12 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
-use common_telemetry::{info, warn};
+use common_telemetry::{debug, info, warn};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
+use tokio::time::sleep;
 
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
@@ -183,6 +185,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 impl<S> RegionWorkerLoop<S> {
     /// Handles region edit request.
     pub(crate) async fn handle_region_edit(&mut self, request: RegionEditRequest) {
+        debug!("enter handle region edit, request = {:?}", request);
         let region_id = request.region_id;
         let Some(region) = self.regions.get_region(region_id) else {
             let _ = request.tx.send(RegionNotFoundSnafu { region_id }.fail());
@@ -220,6 +223,7 @@ impl<S> RegionWorkerLoop<S> {
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
             let result = edit_region(&region, edit.clone(), cache_manager, listener).await;
+            debug!("edit region result = {:?}",result);
             let notify = WorkerRequest::Background {
                 region_id,
                 notify: BackgroundNotify::RegionEdit(RegionEditResult {
@@ -236,11 +240,13 @@ impl<S> RegionWorkerLoop<S> {
                     region_id, res
                 );
             }
+            
         });
     }
 
     /// Handles region edit result.
     pub(crate) async fn handle_region_edit_result(&mut self, edit_result: RegionEditResult) {
+        debug!("enter handle region edit result, result = {:?}", edit_result);
         let region = match self.regions.get_region(edit_result.region_id) {
             Some(region) => region,
             None => {
@@ -258,6 +264,7 @@ impl<S> RegionWorkerLoop<S> {
             edit_result.result.is_ok() && !edit_result.edit.files_to_add.is_empty();
 
         if edit_result.result.is_ok() {
+            debug!("version control apply edit");
             // Applies the edit to the region.
             region
                 .version_control
@@ -266,6 +273,7 @@ impl<S> RegionWorkerLoop<S> {
 
         // Sets the region as writable.
         region.switch_state_to_writable(RegionLeaderState::Editing);
+        debug!("state switched to writable");
 
         let _ = edit_result.sender.send(edit_result.result);
 

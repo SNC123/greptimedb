@@ -19,7 +19,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
-
+use common_telemetry::{debug, warn};
 use common_time::Timestamp;
 use datatypes::arrow::datatypes::SchemaRef;
 use object_store::{FuturesAsyncWriter, ObjectStore};
@@ -34,13 +34,16 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 use store_api::storage::SequenceNumber;
 use tokio::io::AsyncWrite;
+use tokio::sync::mpsc;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
 use crate::access_layer::{FilePathProvider, SstInfoArray, TempFileCleaner};
 use crate::error::{InvalidMetadataSnafu, OpenDalSnafu, Result, WriteParquetSnafu};
 use crate::read::{Batch, Source};
+use crate::region::ManifestContextRef;
+use crate::request::WorkerRequest;
 use crate::sst::file::FileId;
-use crate::sst::index::{Indexer, IndexerBuilder};
+use crate::sst::index::{IndexBuildScheduler, IndexBuildTask, IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
@@ -58,6 +61,7 @@ pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvide
     metadata: RegionMetadataRef,
     /// Indexer build that can create indexer for multiple files.
     indexer_builder: I,
+    index_build_scheduler: IndexBuildScheduler,
     /// Current active indexer.
     current_indexer: Option<Indexer>,
     bytes_written: Arc<AtomicUsize>,
@@ -91,18 +95,20 @@ impl WriterFactory for ObjectStoreWriterFactory {
 impl<I, P> ParquetWriter<ObjectStoreWriterFactory, I, P>
 where
     P: FilePathProvider,
-    I: IndexerBuilder,
+    I: IndexerBuilder + Clone + Send + Sync + 'static,
 {
     pub async fn new_with_object_store(
         object_store: ObjectStore,
         metadata: RegionMetadataRef,
         indexer_builder: I,
+        index_build_scheduler: IndexBuildScheduler,
         path_provider: P,
     ) -> ParquetWriter<ObjectStoreWriterFactory, I, P> {
         ParquetWriter::new(
             ObjectStoreWriterFactory { object_store },
             metadata,
             indexer_builder,
+            index_build_scheduler,
             path_provider,
         )
         .await
@@ -117,7 +123,7 @@ where
 impl<F, I, P> ParquetWriter<F, I, P>
 where
     F: WriterFactory,
-    I: IndexerBuilder,
+    I: IndexerBuilder + Clone + Send + Sync + 'static,
     P: FilePathProvider,
 {
     /// Creates a new parquet SST writer.
@@ -125,6 +131,7 @@ where
         factory: F,
         metadata: RegionMetadataRef,
         indexer_builder: I,
+        index_build_scheduler : IndexBuildScheduler,
         path_provider: P,
     ) -> ParquetWriter<F, I, P> {
         let init_file = FileId::random();
@@ -137,6 +144,7 @@ where
             writer_factory: factory,
             metadata,
             indexer_builder,
+            index_build_scheduler,
             current_indexer: Some(indexer),
             bytes_written: Arc::new(AtomicUsize::new(0)),
             file_cleaner: None,
@@ -164,9 +172,10 @@ where
         source: Source,
         override_sequence: Option<SequenceNumber>, // override the `sequence` field from `Source`
         opts: &WriteOptions,
+        request_sender: Option<mpsc::Sender<WorkerRequest>>,
     ) -> Result<SstInfoArray> {
         let res = self
-            .write_all_without_cleaning(source, override_sequence, opts)
+            .write_all_without_cleaning(source, override_sequence, opts, request_sender)
             .await;
         if res.is_err() {
             // Clean tmp files explicitly on failure.
@@ -183,11 +192,13 @@ where
         mut source: Source,
         override_sequence: Option<SequenceNumber>, // override the `sequence` field from `Source`
         opts: &WriteOptions,
+        request_sender: Option<mpsc::Sender<WorkerRequest>>,
     ) -> Result<SstInfoArray> {
         let write_format =
             WriteFormat::new(self.metadata.clone()).with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
-
+        /* ==================== 核心目标，将本部分的索引创建摘除 ==================== */
+        let mut batches : Vec<Batch> = Vec::new();
         while let Some(res) = self
             .write_next_batch(&mut source, &write_format, opts)
             .await
@@ -196,17 +207,18 @@ where
             match res {
                 Ok(mut batch) => {
                     stats.update(&batch);
-                    self.get_or_create_indexer().await.update(&mut batch).await;
+                    batches.push(batch);
+                    // debug!("index update {:#?}",batch);
+                    // self.get_or_create_indexer().await.update(&mut batch).await;
                 }
                 Err(e) => {
-                    self.get_or_create_indexer().await.abort().await;
+                    // self.get_or_create_indexer().await.abort().await;
                     return Err(e);
                 }
             }
         }
-
-        let index_output = self.get_or_create_indexer().await.finish().await;
-
+        // let index_output = self.get_or_create_indexer().await.finish().await;
+        /* ======================================================================= */
         if stats.num_rows == 0 {
             return Ok(smallvec![]);
         }
@@ -227,6 +239,22 @@ where
         // convert FileMetaData to ParquetMetaData
         let parquet_metadata = parse_parquet_metadata(file_meta)?;
 
+        debug!("dispatched index build task");
+        let _ = self.index_build_scheduler.schedule_build(
+            IndexBuildTask{
+                file_id : self.current_file,
+                region_id : self.metadata.region_id,
+                batches,
+                data_path: None,
+                indexer_builder: Arc::new(self.indexer_builder.clone()),
+                request_sender,
+                time_range,
+                file_size,
+                num_rows: stats.num_rows as u64,
+                num_row_groups: parquet_metadata.num_row_groups() as u64,
+            }
+        );
+
         let file_id = self.current_file;
 
         // object_store.write will make sure all bytes are written or an error is raised.
@@ -237,7 +265,8 @@ where
             num_rows: stats.num_rows,
             num_row_groups: parquet_metadata.num_row_groups() as u64,
             file_metadata: Some(Arc::new(parquet_metadata)),
-            index_metadata: index_output,
+            // index_metadata : index_output,
+            index_metadata: IndexOutput::default(), // 索引元数据需要一种机制异步安装
         }])
     }
 

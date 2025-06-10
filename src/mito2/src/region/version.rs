@@ -26,7 +26,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
@@ -128,15 +128,18 @@ impl VersionControl {
         purger: FilePurgerRef,
     ) {
         let version = self.current().version;
+        debug!("old version = {:?}", version);
+        debug!("version control edit = {:?}", edit);
         let new_version = Arc::new(
             VersionBuilder::from_version(version)
-                .apply_edit(edit, purger)
-                .remove_memtables(memtables_to_remove)
-                .build(),
+            .apply_edit(edit, purger)
+            .remove_memtables(memtables_to_remove)
+            .build(),
         );
-
+        
         let mut version_data = self.data.write().unwrap();
         version_data.version = new_version;
+        debug!("new version = {:?}", version_data.version);
     }
 
     /// Mark all opened files as deleted and set the delete marker in [VersionControlData]
@@ -370,6 +373,7 @@ impl VersionBuilder {
         if let Some(window) = edit.compaction_time_window {
             self.compaction_time_window = Some(window);
         }
+        debug!("file to add = {:?}, file to remove = {:?}", edit.files_to_add, edit.files_to_remove);
         if !edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty() {
             let mut ssts = (*self.ssts).clone();
             ssts.add_files(file_purger, edit.files_to_add.into_iter());

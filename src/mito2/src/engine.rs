@@ -72,7 +72,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{info, tracing};
+use common_telemetry::{debug, info, tracing};
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use futures::future::{join_all, try_join_all};
 use object_store::manager::ObjectStoreManagerRef;
@@ -469,6 +469,8 @@ impl EngineInner {
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
         let version = region.version();
+        debug!("scan version = {:?}",version.ssts);
+        debug!("manifest version = {:?}",region.manifest_ctx);
         // Get cache.
         let cache_manager = self.workers.cache_manager();
 
@@ -727,6 +729,22 @@ impl MitoEngine {
     pub fn purge_scheduler(&self) -> &crate::schedule::scheduler::SchedulerRef {
         self.inner.workers.purge_scheduler()
     }
+
+    pub async fn wait_region_writable(&self, region_id: RegionId) {
+        use std::time::Duration;
+        use std::thread::sleep;
+
+        for _ in 0..1000 {
+            if let Some(region) = self.inner.workers.get_region(region_id) {
+                if region.is_writable() {
+                    return;
+                }
+            }
+            sleep(Duration::from_millis(10));
+        }
+        panic!("Region {} did not become writable in time", region_id);
+    }
+
 }
 
 #[cfg(test)]

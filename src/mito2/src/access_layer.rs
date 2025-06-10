@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
@@ -29,10 +30,12 @@ use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig}
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
+use crate::region::ManifestContextRef;
+use crate::request::WorkerRequest;
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
-use crate::sst::index::IndexerBuilderImpl;
+use crate::sst::index::{IndexBuildScheduler, IndexerBuilderImpl};
 use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
@@ -129,6 +132,8 @@ impl AccessLayer {
         &self,
         request: SstWriteRequest,
         write_opts: &WriteOptions,
+        index_build_scheduler: IndexBuildScheduler,
+        request_sender: Option<mpsc::Sender<WorkerRequest>>,
     ) -> Result<SstInfoArray> {
         let region_id = request.metadata.region_id;
         let cache_manager = request.cache_manager.clone();
@@ -145,6 +150,8 @@ impl AccessLayer {
                         remote_store: self.object_store.clone(),
                     },
                     write_opts,
+                    index_build_scheduler,
+                    request_sender,
                 )
                 .await?
         } else {
@@ -172,12 +179,13 @@ impl AccessLayer {
                 self.object_store.clone(),
                 request.metadata,
                 indexer_builder,
+                index_build_scheduler,
                 path_provider,
             )
             .await
             .with_file_cleaner(cleaner);
             writer
-                .write_all(request.source, request.max_sequence, write_opts)
+                .write_all(request.source, request.max_sequence, write_opts, request_sender)
                 .await?
         };
 

@@ -797,6 +797,7 @@ impl ScanInput {
         file_index: usize,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
+        debug!("enter prune file, files = {:?}, file_index = {:?}",self.files, file_index);
         let file = &self.files[file_index];
         let res = self
             .access_layer

@@ -23,21 +23,33 @@ mod statistics;
 pub(crate) mod store;
 
 use std::num::NonZeroUsize;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, warn};
+
 use puffin_manager::SstPuffinManager;
 use smallvec::SmallVec;
 use statistics::{ByteCount, RowCount};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, RegionId};
+use tokio::time::sleep;
 
 use crate::access_layer::OperationType;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
+use crate::error::{Result};
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
-use crate::sst::file::{FileId, IndexType};
+use crate::region::ManifestContextRef;
+use crate::request::{RegionEditRequest, RegionSyncRequest, WorkerRequest};
+use crate::schedule::scheduler::{Job, LocalScheduler, SchedulerRef};
+use crate::sst::file::{FileId, FileMeta, FileTimeRange, IndexType};
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
@@ -174,6 +186,7 @@ pub trait IndexerBuilder {
     async fn build(&self, file_id: FileId) -> Indexer;
 }
 
+#[derive(Clone)]
 pub(crate) struct IndexerBuilderImpl {
     pub(crate) op_type: OperationType,
     pub(crate) metadata: RegionMetadataRef,
@@ -185,6 +198,7 @@ pub(crate) struct IndexerBuilderImpl {
     pub(crate) fulltext_index_config: FulltextIndexConfig,
     pub(crate) bloom_filter_index_config: BloomFilterConfig,
 }
+
 
 #[async_trait::async_trait]
 impl IndexerBuilder for IndexerBuilderImpl {
@@ -377,6 +391,147 @@ impl IndexerBuilderImpl {
         None
     }
 }
+
+pub struct IndexBuildTask {
+    pub file_id : FileId,
+    pub region_id : RegionId,
+    pub data_path: Option<String>, // used for rebuild
+    pub batches: Vec<Batch>,
+    pub indexer_builder: Arc<dyn IndexerBuilder + Send + Sync>,
+    pub request_sender: Option<mpsc::Sender<WorkerRequest>>,
+    pub time_range: FileTimeRange,
+    pub file_size: u64,
+    pub num_rows: u64,
+    pub num_row_groups: u64,
+}
+
+impl IndexBuildTask {
+    fn into_index_build_job(mut self) -> Job {
+        Box::pin(async move {
+            self.do_index_build().await;
+        })
+    }
+
+    async fn do_index_build(&mut self) {
+        self.index_build().await;
+    } 
+
+    async fn index_build(&mut self) {
+        debug!("index builder file id : {}", self.file_id);
+        let mut indexer = self.indexer_builder.build(self.file_id).await;
+        // debug!("index build task batches: {:#?}", self.batches);
+        for batch in &mut self.batches {
+            indexer.update(batch).await;
+        }
+        let index_ouput = indexer.finish().await;
+        if index_ouput.file_size > 0 {
+            self.install_index_metadata(index_ouput).await;
+        }
+    }
+
+    async fn install_index_metadata(&self, output : IndexOutput) {
+        let edit = RegionEdit {
+            files_to_add : vec![FileMeta{
+                file_id : self.file_id,
+                region_id: self.region_id,
+                available_indexes: output.build_available_indexes(),
+                index_file_size: output.file_size,
+                time_range: self.time_range,
+                level: 0,
+                file_size: self.file_size,
+                num_rows: self.num_rows,
+                num_row_groups: self.num_row_groups,
+                sequence: None,
+            }],
+            files_to_remove: vec![],
+            flushed_sequence: None,
+            flushed_entry_id: None,
+            compaction_time_window: None,
+        };
+        // sleep(Duration::from_millis(10)).await;
+        debug!("send region edit request");
+        let (tx, rx) = oneshot::channel();
+        let edit_request = WorkerRequest::EditRegion(
+            RegionEditRequest {
+                region_id: self.region_id,
+                edit,
+                tx,
+            }
+        );
+        self.send_request(edit_request).await;
+        if let Ok(_) = rx.await {
+            debug!("region edit finished");
+        }
+    }
+
+    /// Notify job status.
+    async fn send_request(&self, request: WorkerRequest) {
+        if let Some(sender) = &self.request_sender {            
+            if let Err(e) = sender.send(request).await {
+                warn!(
+                    "Failed to notify flush job status for region {}, request: {:?}",
+                    self.region_id, e.0
+                );
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct IndexBuildScheduler {
+    // file_status: HashMap<FileId, IndexBuildStatus>, // 维护各个文件的索引构建状态
+    scheduler: SchedulerRef, 
+}   
+
+impl IndexBuildScheduler {
+    pub fn new(scheduler: SchedulerRef) -> Self {
+        IndexBuildScheduler {
+            // file_status : HashMap::new(),
+            scheduler,
+        }
+    }
+    pub fn schedule_build(&mut self, task : IndexBuildTask) -> Result<()> {
+        let file_id = task.file_id;
+        debug!("receive index build task, file_id = {:?}", file_id);
+        // let index_build_status = self
+        //     .file_status
+        //     .entry(file_id)
+        //     .or_insert_with(|| IndexBuildStatus { 
+        //         file_id,
+        //         // pending_task: None,
+        //         current_indexer: None,
+        // });
+        // index_build_status.pending_task.push_back(task);
+        // if let None() = index_build_status.pending_task {}
+
+        let job = task.into_index_build_job();
+        if let Err(e) = self.scheduler.schedule(job) {
+            return Err(e);
+        }
+
+        Ok(())
+    }
+}
+// struct IndexBuildStatus {
+//     file_id: FileId,
+//     // pending_task: Option<IndexBuildTask>,
+//     current_indexer: Option<Indexer>,
+// }
+
+// impl IndexBuildStatus {
+//     async fn get_or_create_indexer(&mut self) -> &mut Indexer {
+//         match self.current_indexer {
+//             None => {
+//                 let indexer = self.indexer_builder.build(self.current_file).await;
+//                 self.current_indexer = Some(indexer);
+//                 // safety: self.current_indexer already set above.
+//                 self.current_indexer.as_mut().unwrap()
+//             }
+//             Some(ref mut indexer) => indexer,
+//         }
+//     }
+// }
+
 
 #[cfg(test)]
 mod tests {

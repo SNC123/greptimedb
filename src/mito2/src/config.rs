@@ -67,6 +67,8 @@ pub struct MitoConfig {
     pub compress_manifest: bool,
 
     // Background job configs:
+    /// Max number of running background index build jobs (default: number of cpu cores).
+    pub max_background_index_builds: usize,
     /// Max number of running background flush jobs (default: 1/2 of cpu cores).
     pub max_background_flushes: usize,
     /// Max number of running background compaction jobs (default: 1/4 of cpu cores).
@@ -136,6 +138,7 @@ impl Default for MitoConfig {
             worker_request_batch_size: 64,
             manifest_checkpoint_distance: 10,
             compress_manifest: false,
+            max_background_index_builds: common_config::utils::get_cpus(),
             max_background_flushes: divide_num_cpus(2),
             max_background_compactions: divide_num_cpus(4),
             max_background_purges: common_config::utils::get_cpus(),

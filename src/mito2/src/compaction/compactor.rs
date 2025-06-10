@@ -40,12 +40,13 @@ use crate::read::Source;
 use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
-use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
+use crate::region::{ManifestContext, ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::IndexBuildScheduler;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::version::{SstVersion, SstVersionRef};
 
@@ -294,6 +295,13 @@ impl Compactor for DefaultCompactor {
             let region_id = compaction_region.region_id;
             let cache_manager = compaction_region.cache_manager.clone();
             let storage = compaction_region.region_options.storage.clone();
+            let index_build_scheduler = IndexBuildScheduler::new(
+                Arc::new(
+                    LocalScheduler::new(
+                        compaction_region.engine_config.max_background_index_builds
+                    )
+                )
+            );
             let index_options = compaction_region
                 .current_version
                 .options
@@ -344,6 +352,8 @@ impl Compactor for DefaultCompactor {
                             bloom_filter_index_config,
                         },
                         &write_opts,
+                        index_build_scheduler,
+                        None,
                     )
                     .await?
                     .into_iter()

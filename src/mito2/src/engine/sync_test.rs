@@ -132,7 +132,7 @@ async fn test_sync_after_flush_region() {
     let expected = "++\n++";
     scan_check(&follower_engine, region_id, expected, 0, 0).await;
 
-    // Returns error since the max manifest is 1
+    // Returns error since the max manifest is 1 
     let manifest_info = RegionManifestInfo::mito(2, 0);
     let err = follower_engine
         .sync_region(region_id, manifest_info)

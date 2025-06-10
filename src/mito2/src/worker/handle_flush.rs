@@ -17,7 +17,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
@@ -120,6 +120,7 @@ impl<S> RegionWorkerLoop<S> {
             engine_config,
             row_group_size,
             cache_manager: self.cache_manager.clone(),
+            index_build_scheduler: self.index_build_scheduler.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             index_options: region.version().options.index_options.clone(),
         }
