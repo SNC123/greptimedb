@@ -352,10 +352,9 @@ impl Compactor for DefaultCompactor {
                             bloom_filter_index_config,
                         },
                         &write_opts,
-                        index_build_scheduler,
-                        None,
                     )
                     .await?
+                    .sst_infos
                     .into_iter()
                     .map(|sst_info| FileMeta {
                         region_id,

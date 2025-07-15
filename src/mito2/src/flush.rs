@@ -46,7 +46,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::FileMeta;
-use crate::sst::index::IndexBuildScheduler;
+use crate::sst::index::{IndexBuildScheduler, IndexerBuilderImpl};
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
 
@@ -232,7 +232,6 @@ pub(crate) struct RegionFlushTask {
     pub(crate) row_group_size: Option<usize>,
     pub(crate) cache_manager: CacheManagerRef,
     pub(crate) manifest_ctx: ManifestContextRef,
-    pub(crate) index_build_scheduler: IndexBuildScheduler,
     /// Index options for the region.
     pub(crate) index_options: IndexOptions,
 }
@@ -282,7 +281,7 @@ impl RegionFlushTask {
         self.listener.on_flush_begin(self.region_id).await;
 
         let worker_request = match self.flush_memtables(&version_data).await {
-            Ok(edit) => {
+            Ok((edit, indexer_builders)) => {
                 let memtables_to_remove = version_data
                     .version
                     .memtables
@@ -297,6 +296,7 @@ impl RegionFlushTask {
                     senders: std::mem::take(&mut self.senders),
                     _timer: timer,
                     edit,
+                    indexer_builders,
                     memtables_to_remove,
                 };
                 WorkerRequest::Background {
@@ -321,8 +321,8 @@ impl RegionFlushTask {
     }
 
     /// Flushes memtables to level 0 SSTs and updates the manifest.
-    /// Returns the [RegionEdit] to apply.
-    async fn flush_memtables(&self, version_data: &VersionControlData) -> Result<RegionEdit> {
+    /// Returns the [RegionEdit] to apply and [IndexerBuilderImpl] to build index.
+    async fn flush_memtables(&self, version_data: &VersionControlData) -> Result<(RegionEdit, Vec<IndexerBuilderImpl>)> {
         // We must use the immutable memtables list and entry ids from the `version_data`
         // for consistency as others might already modify the version in the `version_control`.
         let version = &version_data.version;
@@ -341,6 +341,7 @@ impl RegionFlushTask {
         let memtables = version.memtables.immutables();
         let mut file_metas = Vec::with_capacity(memtables.len());
         let mut flushed_bytes = 0;
+        let mut indexer_builders = Vec::with_capacity(memtables.len());
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
@@ -365,20 +366,21 @@ impl RegionFlushTask {
                 bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
             };
 
-            let ssts_written = self
+            let sst_write_output = self
                 .access_layer
                 .write_sst(
                     write_request, 
                     &write_opts, 
-                    self.index_build_scheduler.clone(),
-                    Some(self.request_sender.clone()),
                 ).await?;
-            if ssts_written.is_empty() {
+            if sst_write_output.sst_infos.is_empty() {
                 // No data written.
                 continue;
             }
+            if let Some(indexer_builder) = sst_write_output.indexer_builder {
+                indexer_builders.push(indexer_builder);
+            }
 
-            file_metas.extend(ssts_written.into_iter().map(|sst_info| {
+            file_metas.extend(sst_write_output.sst_infos.into_iter().map(|sst_info| {
                 flushed_bytes += sst_info.file_size;
                 FileMeta {
                     region_id: self.region_id,
@@ -429,7 +431,6 @@ impl RegionFlushTask {
         // add a cleanup job to remove them later.
         let version = self
             .manifest_ctx
-            /* ==== 当前索引元数据通过manifest统一更新 ==== */
             .update_manifest(expected_state, action_list)
             .await?;
         info!(
@@ -438,7 +439,7 @@ impl RegionFlushTask {
             self.reason.as_str()
         );
 
-        Ok(edit)
+        Ok((edit, indexer_builders))
     }
 
     /// Notify flush job status.
@@ -872,9 +873,6 @@ mod tests {
         let mut scheduler = env.mock_flush_scheduler();
         
         let builder = VersionControlBuilder::new();
-        let mock_index_build_scheduler = IndexBuildScheduler::new(
-            Arc::new(LocalScheduler::new(5))
-        );
         let version_control = Arc::new(builder.build());
         let (output_tx, output_rx) = oneshot::channel();
         let mut task = RegionFlushTask {
@@ -887,7 +885,6 @@ mod tests {
             engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,
             cache_manager: Arc::new(CacheManager::default()),
-            index_build_scheduler: mock_index_build_scheduler,
             manifest_ctx: env
                 .mock_manifest_context(version_control.current().version.metadata.clone())
                 .await,
@@ -909,9 +906,6 @@ mod tests {
         let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_flush_scheduler();
-        let mock_index_build_scheduler = IndexBuildScheduler::new(
-            Arc::new(LocalScheduler::new(5))
-        );
         let mut builder = VersionControlBuilder::new();
         // Overwrites the empty memtable builder.
         builder.set_memtable_builder(Arc::new(TimeSeriesMemtableBuilder::default()));
@@ -934,7 +928,6 @@ mod tests {
                 engine_config: Arc::new(MitoConfig::default()),
                 row_group_size: None,
                 cache_manager: Arc::new(CacheManager::default()),
-                index_build_scheduler: mock_index_build_scheduler.clone(),
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
             })

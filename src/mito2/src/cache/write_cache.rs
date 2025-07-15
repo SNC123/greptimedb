@@ -26,8 +26,7 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::access_layer::{
-    new_fs_cache_store, FilePathProvider, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
-    TempFileCleaner, WriteCachePathProvider,
+    new_fs_cache_store, FilePathProvider, RegionFilePathFactory, SstInfoArray, SstWriteOutput, SstWriteRequest, TempFileCleaner, WriteCachePathProvider
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
@@ -110,9 +109,7 @@ impl WriteCache {
         write_request: SstWriteRequest,
         upload_request: SstUploadRequest,
         write_opts: &WriteOptions,
-        index_build_scheduler: IndexBuildScheduler,
-        request_sender: Option<mpsc::Sender<WorkerRequest>>,
-    ) -> Result<SstInfoArray> {
+    ) -> Result<SstWriteOutput> {
         let timer = FLUSH_ELAPSED
             .with_label_values(&["write_sst"])
             .start_timer();
@@ -140,22 +137,25 @@ impl WriteCache {
         let mut writer = ParquetWriter::new_with_object_store(
             store.clone(),
             write_request.metadata,
-            indexer,
-            index_build_scheduler,
             path_provider.clone(),
         )
         .await
         .with_file_cleaner(cleaner);
 
         let sst_info = writer
-            .write_all(write_request.source, write_request.max_sequence, write_opts, request_sender)
+            .write_all(write_request.source, write_request.max_sequence, write_opts)
             .await?;
 
         timer.stop_and_record();
 
         // Upload sst file to remote object store.
         if sst_info.is_empty() {
-            return Ok(sst_info);
+            return Ok(
+                SstWriteOutput {
+                    sst_infos: sst_info,
+                    indexer_builder: None,
+                }
+            );
         }
 
         let mut upload_tracker = UploadTracker::new(region_id);
@@ -193,7 +193,12 @@ impl WriteCache {
             return Err(err);
         }
 
-        Ok(sst_info)
+        Ok(
+            SstWriteOutput {
+                sst_infos: sst_info,
+                indexer_builder: Some(indexer),
+            }
+        )
     }
 
     /// Removes a file from the cache by `index_key`.
@@ -459,9 +464,6 @@ mod tests {
         // and now just use local file system to mock.
         let mut env = TestEnv::new();
         let mock_store = env.init_object_store_manager();
-        let mock_index_build_scheduler = IndexBuildScheduler::new(
-            Arc::new(LocalScheduler::new(5))
-        );
         let path_provider = RegionFilePathFactory::new("test".to_string());
 
         let local_dir = create_temp_dir("");
@@ -509,11 +511,10 @@ mod tests {
                 write_request, 
                 upload_request, 
                 &write_opts, 
-                mock_index_build_scheduler,
-                None,
             )
             .await
             .unwrap()
+            .sst_infos
             .remove(0); //todo(hl): we assume it only creates one file.
 
         let file_id = sst_info.file_id;
@@ -557,9 +558,6 @@ mod tests {
         let mut env = TestEnv::new();
         let data_home = env.data_home().display().to_string();
         let mock_store = env.init_object_store_manager();
-        let mock_index_build_scheduler = IndexBuildScheduler::new(
-            Arc::new(LocalScheduler::new(5))
-        );
         let local_dir = create_temp_dir("");
         let local_path = local_dir.path().to_str().unwrap();
         let local_store = new_fs_store(local_path);
@@ -610,11 +608,10 @@ mod tests {
                 write_request, 
                 upload_request, 
                 &write_opts, 
-                mock_index_build_scheduler,
-                None,
             )
             .await
             .unwrap()
+            .sst_infos
             .remove(0);
         let write_parquet_metadata = sst_info.file_metadata.unwrap();
 
@@ -634,9 +631,6 @@ mod tests {
         let mut env = TestEnv::new();
         let data_home = env.data_home().display().to_string();
         let mock_store = env.init_object_store_manager();
-        let mock_index_build_scheduler = IndexBuildScheduler::new(
-            Arc::new(LocalScheduler::new(5))
-        );
         let write_cache_dir = create_temp_dir("");
         let write_cache_path = write_cache_dir.path().to_str().unwrap();
         let write_cache = env
@@ -692,8 +686,6 @@ mod tests {
                 write_request, 
                 upload_request, 
                 &write_opts, 
-                mock_index_build_scheduler,
-                None,
             )
             .await
             .unwrap_err();

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -132,13 +133,11 @@ impl AccessLayer {
         &self,
         request: SstWriteRequest,
         write_opts: &WriteOptions,
-        index_build_scheduler: IndexBuildScheduler,
-        request_sender: Option<mpsc::Sender<WorkerRequest>>,
-    ) -> Result<SstInfoArray> {
+    ) -> Result<SstWriteOutput> {
         let region_id = request.metadata.region_id;
         let cache_manager = request.cache_manager.clone();
 
-        let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
+        let sst_write_output = if let Some(write_cache) = cache_manager.write_cache() {
             // Write to the write cache.
             write_cache
                 .write_and_upload_sst(
@@ -150,8 +149,6 @@ impl AccessLayer {
                         remote_store: self.object_store.clone(),
                     },
                     write_opts,
-                    index_build_scheduler,
-                    request_sender,
                 )
                 .await?
         } else {
@@ -178,20 +175,19 @@ impl AccessLayer {
             let mut writer = ParquetWriter::new_with_object_store(
                 self.object_store.clone(),
                 request.metadata,
-                indexer_builder,
-                index_build_scheduler,
                 path_provider,
             )
             .await
             .with_file_cleaner(cleaner);
-            writer
-                .write_all(request.source, request.max_sequence, write_opts, request_sender)
-                .await?
+            SstWriteOutput {
+                sst_infos :  writer.write_all(request.source, request.max_sequence, write_opts).await?,
+                indexer_builder: Some(indexer_builder)
+            }        
         };
 
         // Put parquet metadata to cache manager.
-        if !sst_info.is_empty() {
-            for sst in &sst_info {
+        if !sst_write_output.sst_infos.is_empty() {
+            for sst in &sst_write_output.sst_infos {
                 if let Some(parquet_metadata) = &sst.file_metadata {
                     cache_manager.put_parquet_meta_data(
                         region_id,
@@ -202,7 +198,7 @@ impl AccessLayer {
             }
         }
 
-        Ok(sst_info)
+        Ok(sst_write_output)
     }
 }
 
@@ -228,6 +224,26 @@ pub struct SstWriteRequest {
     pub inverted_index_config: InvertedIndexConfig,
     pub fulltext_index_config: FulltextIndexConfig,
     pub bloom_filter_index_config: BloomFilterConfig,
+}
+
+/// Contents to install (index)metadata
+pub struct SstWriteOutput {
+    pub  sst_infos: SstInfoArray,
+    pub(crate)  indexer_builder: Option<IndexerBuilderImpl>,
+}
+
+impl fmt::Debug for SstWriteOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SstWriteOutput")
+            .field("sst_infos", &self.sst_infos)
+            .field("indexer_builder", 
+            &match self.indexer_builder {
+                None => &"None",
+                Some(_) => &"Some(...)",
+            }
+            )
+            .finish()
+    }
 }
 
 /// Cleaner to remove temp files on the atomic write dir.

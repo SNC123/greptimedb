@@ -166,14 +166,12 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
-            NoopIndexBuilder,
-            mock_index_build_scheduler,
             file_path,
         )
         .await;
 
         let info = writer
-            .write_all(source, None, &write_opts, None)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -225,8 +223,6 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
-            NoopIndexBuilder,
-            mock_index_build_scheduler,
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
@@ -234,7 +230,7 @@ mod tests {
         .await;
 
         writer
-            .write_all(source, None, &write_opts, None)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -300,8 +296,6 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
-            NoopIndexBuilder,
-            mock_index_build_scheduler,
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
@@ -309,7 +303,7 @@ mod tests {
         .await;
 
         let sst_info = writer
-            .write_all(source, None, &write_opts, None)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -346,15 +340,13 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
-            NoopIndexBuilder,
-            mock_index_build_scheduler,
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
         )
         .await;
         writer
-            .write_all(source, None, &write_opts, None)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -402,15 +394,13 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
-            NoopIndexBuilder,
-            mock_index_build_scheduler,
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
         )
         .await;
         writer
-            .write_all(source, None, &write_opts, None)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -443,8 +433,6 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
-            NoopIndexBuilder,
-            mock_index_build_scheduler,
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
@@ -452,7 +440,7 @@ mod tests {
         .await;
 
         writer
-            .write_all(source, None, &write_opts, None)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);

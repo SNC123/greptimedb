@@ -22,10 +22,12 @@ pub mod puffin_manager;
 mod statistics;
 pub(crate) mod store;
 
+use std::fmt;
 use std::num::NonZeroUsize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
 
 use bloom_filter::creator::BloomFilterIndexer;
@@ -35,24 +37,26 @@ use puffin_manager::SstPuffinManager;
 use smallvec::SmallVec;
 use statistics::{ByteCount, RowCount};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, RegionId};
+use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 use tokio::time::sleep;
 
-use crate::access_layer::OperationType;
+use crate::access_layer::{self, AccessLayerRef, OperationType};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
-use crate::read::Batch;
+use crate::read::{Batch, BatchReader};
 use crate::region::options::IndexOptions;
 use crate::region::ManifestContextRef;
 use crate::request::{RegionEditRequest, RegionSyncRequest, WorkerRequest};
 use crate::schedule::scheduler::{Job, LocalScheduler, SchedulerRef};
-use crate::sst::file::{FileId, FileMeta, FileTimeRange, IndexType};
+use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange, IndexType};
+use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
+use crate::wal::EntryId;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
@@ -197,6 +201,20 @@ pub(crate) struct IndexerBuilderImpl {
     pub(crate) inverted_index_config: InvertedIndexConfig,
     pub(crate) fulltext_index_config: FulltextIndexConfig,
     pub(crate) bloom_filter_index_config: BloomFilterConfig,
+}
+
+impl fmt::Debug for IndexerBuilderImpl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IndexerBuilderImpl")
+            .field("op_type", &self.op_type)
+            .field("metadata", &self.metadata) // 若 metadata 没有 Debug，可以省略细节
+            .field("row_group_size", &self.row_group_size)
+            .field("index_options", &self.index_options)
+            .field("inverted_index_config", &self.inverted_index_config)
+            .field("fulltext_index_config", &self.fulltext_index_config)
+            .field("bloom_filter_index_config", &self.bloom_filter_index_config)
+            .finish()
+    }
 }
 
 
@@ -393,16 +411,13 @@ impl IndexerBuilderImpl {
 }
 
 pub struct IndexBuildTask {
-    pub file_id : FileId,
-    pub region_id : RegionId,
-    pub data_path: Option<String>, // used for rebuild
-    pub batches: Vec<Batch>,
+    pub file_meta: FileMeta,
+    pub flushed_entry_id: Option<EntryId>,
+    pub flushed_sequence: Option<SequenceNumber>,
+    pub access_layer: AccessLayerRef,
+    pub file_purger: FilePurgerRef,
     pub indexer_builder: Arc<dyn IndexerBuilder + Send + Sync>,
-    pub request_sender: Option<mpsc::Sender<WorkerRequest>>,
-    pub time_range: FileTimeRange,
-    pub file_size: u64,
-    pub num_rows: u64,
-    pub num_row_groups: u64,
+    pub(crate) request_sender: Sender<WorkerRequest>,
 }
 
 impl IndexBuildTask {
@@ -413,47 +428,44 @@ impl IndexBuildTask {
     }
 
     async fn do_index_build(&mut self) {
-        self.index_build().await;
+        let _ = self.index_build().await;
     } 
 
-    async fn index_build(&mut self) {
-        debug!("index builder file id : {}", self.file_id);
-        let mut indexer = self.indexer_builder.build(self.file_id).await;
-        // debug!("index build task batches: {:#?}", self.batches);
-        for batch in &mut self.batches {
+    async fn index_build(&mut self) -> Result<()> {
+        debug!("index builder file id : {}", self.file_meta.file_id);
+        let mut indexer = self.indexer_builder.build(self.file_meta.file_id).await;
+        let mut parquet_reader = self.access_layer.read_sst(
+            FileHandle::new(self.file_meta.clone(), self.file_purger.clone())
+        ).build().await?; 
+
+        // TODO(hsc): optimize index batch
+        while let Some(batch) = &mut parquet_reader.next_batch().await? {
             indexer.update(batch).await;
         }
-        let index_ouput = indexer.finish().await;
-        if index_ouput.file_size > 0 {
-            self.install_index_metadata(index_ouput).await;
+
+        let index_output = indexer.finish().await;
+        if index_output.file_size > 0 {
+            self.install_index_metadata(index_output).await;
         }
+        Ok(())
     }
 
-    async fn install_index_metadata(&self, output : IndexOutput) {
+    async fn install_index_metadata(&mut self, output : IndexOutput) {
+
+        self.file_meta.available_indexes = output.build_available_indexes();
+        self.file_meta.index_file_size = output.file_size;
         let edit = RegionEdit {
-            files_to_add : vec![FileMeta{
-                file_id : self.file_id,
-                region_id: self.region_id,
-                available_indexes: output.build_available_indexes(),
-                index_file_size: output.file_size,
-                time_range: self.time_range,
-                level: 0,
-                file_size: self.file_size,
-                num_rows: self.num_rows,
-                num_row_groups: self.num_row_groups,
-                sequence: None,
-            }],
+            files_to_add : vec![self.file_meta.clone()],
             files_to_remove: vec![],
-            flushed_sequence: None,
-            flushed_entry_id: None,
+            flushed_sequence: self.flushed_sequence,
+            flushed_entry_id: self.flushed_entry_id,
             compaction_time_window: None,
         };
-        // sleep(Duration::from_millis(10)).await;
         debug!("send region edit request");
         let (tx, rx) = oneshot::channel();
         let edit_request = WorkerRequest::EditRegion(
             RegionEditRequest {
-                region_id: self.region_id,
+                region_id: self.file_meta.region_id,
                 edit,
                 tx,
             }
@@ -465,14 +477,12 @@ impl IndexBuildTask {
     }
 
     /// Notify job status.
-    async fn send_request(&self, request: WorkerRequest) {
-        if let Some(sender) = &self.request_sender {            
-            if let Err(e) = sender.send(request).await {
-                warn!(
-                    "Failed to notify flush job status for region {}, request: {:?}",
-                    self.region_id, e.0
-                );
-            }
+    async fn send_request(&self, request: WorkerRequest) {     
+        if let Err(e) = self.request_sender.send(request).await {
+            warn!(
+                "Failed to notify flush job status for region {}, request: {:?}",
+                self.file_meta.region_id, e.0
+            );
         }
     }
 }
@@ -491,7 +501,7 @@ impl IndexBuildScheduler {
         }
     }
     pub fn schedule_build(&mut self, task : IndexBuildTask) -> Result<()> {
-        let file_id = task.file_id;
+        let file_id = task.file_meta.file_id;
         debug!("receive index build task, file_id = {:?}", file_id);
         // let index_build_status = self
         //     .file_status

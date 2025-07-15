@@ -50,6 +50,7 @@ use crate::manifest::action::RegionEdit;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
+use crate::sst::index::IndexerBuilderImpl;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::wal::EntryId;
 
@@ -782,6 +783,8 @@ pub(crate) struct FlushFinished {
     pub(crate) _timer: HistogramTimer,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
+    /// Indexer builders .
+    pub(crate) indexer_builders: Vec<IndexerBuilderImpl>,
     /// Memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
 }
