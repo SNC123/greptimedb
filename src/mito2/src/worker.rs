@@ -26,6 +26,7 @@ mod handle_manifest;
 mod handle_open;
 mod handle_truncate;
 mod handle_write;
+mod handle_rebuild_index;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -54,7 +55,7 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error;
+use crate::{error, request};
 use crate::error::{CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
@@ -839,10 +840,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         general_requests: &mut Vec<WorkerRequest>,
         bulk_requests: &mut Vec<SenderBulkRequest>,
     ) {
-        debug!("------------------");
-        debug!("write requests = {:?}", write_requests);
-        debug!("general requests = {:?}", general_requests);
-        debug!("------------------");
         for worker_req in general_requests.drain(..) {
             match worker_req {
                 WorkerRequest::Write(_) | WorkerRequest::Ddl(_) => {
@@ -863,6 +860,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request).await;
+                }
+                WorkerRequest::BuildIndexRegion(request) => {
+                    self.handle_rebuild_index(request).await;
                 }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));

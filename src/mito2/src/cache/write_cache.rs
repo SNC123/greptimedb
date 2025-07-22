@@ -26,7 +26,7 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::access_layer::{
-    new_fs_cache_store, FilePathProvider, RegionFilePathFactory, SstInfoArray, SstWriteOutput, SstWriteRequest, TempFileCleaner, WriteCachePathProvider
+    new_fs_cache_store, FilePathProvider, RegionFilePathFactory, SstInfoArray, SstWriteRequest, TempFileCleaner, WriteCachePathProvider
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
@@ -37,7 +37,7 @@ use crate::metrics::{
 use crate::region::ManifestContextRef;
 use crate::request::WorkerRequest;
 use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::{IndexBuildScheduler, IndexerBuilderImpl};
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::WriteOptions;
@@ -103,13 +103,20 @@ impl WriteCache {
         self.file_cache.clone()
     }
 
+    /// Build the puffin manager with given region id
+    pub(crate) fn build_puffin_manager(&self, region_id: RegionId) -> SstPuffinManager{
+        let store = self.file_cache.local_store();
+        let path_provider = WriteCachePathProvider::new(region_id, self.file_cache.clone());
+        self.puffin_manager_factory.build(store, path_provider)
+    }
+
     /// Writes SST to the cache and then uploads it to the remote object store.
     pub(crate) async fn write_and_upload_sst(
         &self,
         write_request: SstWriteRequest,
         upload_request: SstUploadRequest,
         write_opts: &WriteOptions,
-    ) -> Result<SstWriteOutput> {
+    ) -> Result<SstInfoArray> {
         let timer = FLUSH_ELAPSED
             .with_label_values(&["write_sst"])
             .start_timer();
@@ -118,19 +125,6 @@ impl WriteCache {
 
         let store = self.file_cache.local_store();
         let path_provider = WriteCachePathProvider::new(region_id, self.file_cache.clone());
-        let indexer = IndexerBuilderImpl {
-            op_type: write_request.op_type,
-            metadata: write_request.metadata.clone(),
-            row_group_size: write_opts.row_group_size,
-            puffin_manager: self
-                .puffin_manager_factory
-                .build(store.clone(), path_provider.clone()),
-            intermediate_manager: self.intermediate_manager.clone(),
-            index_options: write_request.index_options,
-            inverted_index_config: write_request.inverted_index_config,
-            fulltext_index_config: write_request.fulltext_index_config,
-            bloom_filter_index_config: write_request.bloom_filter_index_config,
-        };
 
         let cleaner = TempFileCleaner::new(region_id, store.clone());
         // Write to FileCache.
@@ -150,12 +144,7 @@ impl WriteCache {
 
         // Upload sst file to remote object store.
         if sst_info.is_empty() {
-            return Ok(
-                SstWriteOutput {
-                    sst_infos: sst_info,
-                    indexer_builder: None,
-                }
-            );
+            return Ok(sst_info);
         }
 
         let mut upload_tracker = UploadTracker::new(region_id);
@@ -193,12 +182,7 @@ impl WriteCache {
             return Err(err);
         }
 
-        Ok(
-            SstWriteOutput {
-                sst_infos: sst_info,
-                indexer_builder: Some(indexer),
-            }
-        )
+        Ok(sst_info)
     }
 
     /// Removes a file from the cache by `index_key`.
@@ -514,7 +498,6 @@ mod tests {
             )
             .await
             .unwrap()
-            .sst_infos
             .remove(0); //todo(hl): we assume it only creates one file.
 
         let file_id = sst_info.file_id;
@@ -611,7 +594,6 @@ mod tests {
             )
             .await
             .unwrap()
-            .sst_infos
             .remove(0);
         let write_parquet_metadata = sst_info.file_metadata.unwrap();
 

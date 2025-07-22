@@ -142,7 +142,7 @@ impl Default for MitoConfig {
             max_background_flushes: divide_num_cpus(2),
             max_background_compactions: divide_num_cpus(4),
             max_background_purges: common_config::utils::get_cpus(),
-            auto_flush_interval: Duration::from_secs(30 * 60),
+            auto_flush_interval: Duration::from_secs(1 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
             sst_meta_cache_size: ReadableSize::mb(128),

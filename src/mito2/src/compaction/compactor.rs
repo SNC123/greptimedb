@@ -354,7 +354,6 @@ impl Compactor for DefaultCompactor {
                         &write_opts,
                     )
                     .await?
-                    .sst_infos
                     .into_iter()
                     .map(|sst_info| FileMeta {
                         region_id,

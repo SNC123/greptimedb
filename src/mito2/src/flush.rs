@@ -281,7 +281,7 @@ impl RegionFlushTask {
         self.listener.on_flush_begin(self.region_id).await;
 
         let worker_request = match self.flush_memtables(&version_data).await {
-            Ok((edit, indexer_builders)) => {
+            Ok(edit) => {
                 let memtables_to_remove = version_data
                     .version
                     .memtables
@@ -296,7 +296,6 @@ impl RegionFlushTask {
                     senders: std::mem::take(&mut self.senders),
                     _timer: timer,
                     edit,
-                    indexer_builders,
                     memtables_to_remove,
                 };
                 WorkerRequest::Background {
@@ -322,7 +321,7 @@ impl RegionFlushTask {
 
     /// Flushes memtables to level 0 SSTs and updates the manifest.
     /// Returns the [RegionEdit] to apply and [IndexerBuilderImpl] to build index.
-    async fn flush_memtables(&self, version_data: &VersionControlData) -> Result<(RegionEdit, Vec<IndexerBuilderImpl>)> {
+    async fn flush_memtables(&self, version_data: &VersionControlData) -> Result<RegionEdit> {
         // We must use the immutable memtables list and entry ids from the `version_data`
         // for consistency as others might already modify the version in the `version_control`.
         let version = &version_data.version;
@@ -341,7 +340,6 @@ impl RegionFlushTask {
         let memtables = version.memtables.immutables();
         let mut file_metas = Vec::with_capacity(memtables.len());
         let mut flushed_bytes = 0;
-        let mut indexer_builders = Vec::with_capacity(memtables.len());
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
@@ -366,21 +364,18 @@ impl RegionFlushTask {
                 bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
             };
 
-            let sst_write_output = self
+            let ssts_written = self
                 .access_layer
                 .write_sst(
                     write_request, 
                     &write_opts, 
                 ).await?;
-            if sst_write_output.sst_infos.is_empty() {
+            if ssts_written.is_empty() {
                 // No data written.
                 continue;
             }
-            if let Some(indexer_builder) = sst_write_output.indexer_builder {
-                indexer_builders.push(indexer_builder);
-            }
 
-            file_metas.extend(sst_write_output.sst_infos.into_iter().map(|sst_info| {
+            file_metas.extend(ssts_written.into_iter().map(|sst_info| {
                 flushed_bytes += sst_info.file_size;
                 FileMeta {
                     region_id: self.region_id,
@@ -439,7 +434,7 @@ impl RegionFlushTask {
             self.reason.as_str()
         );
 
-        Ok((edit, indexer_builders))
+        Ok(edit)
     }
 
     /// Notify flush job status.

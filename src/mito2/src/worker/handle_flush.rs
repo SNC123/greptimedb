@@ -27,9 +27,11 @@ use crate::config::MitoConfig;
 use crate::error::{RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
-use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
+use crate::request::{
+    FlushFailed, FlushFinished, OnFailure, OptionOutputTx, RegionBuildIndexRequest,
+};
 use crate::sst::file_purger::{FilePurger, LocalFilePurger};
-use crate::sst::index::IndexBuildTask;
+use crate::sst::index::{IndexBuildTask, IndexBuildType};
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -234,42 +236,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             request.on_failure(e);
             return;
         }
-        
-        let flushed_entry_id = request.edit.flushed_entry_id;
-        let flushed_sequence = request.edit.flushed_sequence;
-        let flushed_files = request.edit.files_to_add.clone();
-        let indexer_builders = request.indexer_builders.clone();
+
+        let index_build_file_metas = request.edit.files_to_add.clone();
 
         // Notifies waiters and observes the flush timer.
         request.on_success();
-        
-        if flushed_files.len() != indexer_builders.len() {
-            if cfg!(any(test, feature = "test")) {
-                panic!("Mismatch between flushed files and indexer builders");
-            } else {
-                warn!("Mismatch between flushed files and indexer builders");
-            }          
-        }
 
-        // Dispatch task for index build.
-        for idx in 0..flushed_files.len() {
-            let Some(region) = self.regions.get_region(flushed_files[idx].region_id) else {
-                continue;
-            };
-            let _ = self.index_build_scheduler.schedule_build(IndexBuildTask{
-                file_meta: flushed_files[idx].clone(),
-                flushed_entry_id,
-                flushed_sequence,
-                indexer_builder: Arc::new(indexer_builders[idx].clone()),
-                file_purger: Arc::new(LocalFilePurger::new(
-                    self.purge_scheduler.clone(),
-                    region.access_layer.clone(),
-                    Some(self.cache_manager.clone()),
-                )),
-                request_sender: self.sender.clone(),
-                access_layer: region.access_layer.clone(),
-            });
-        }
+        // Create indexes after flush.
+        self.handle_rebuild_index(RegionBuildIndexRequest {
+            region_id,
+            build_type: IndexBuildType::Flush,
+            file_metas: index_build_file_metas,
+        })
+        .await;
 
         // Handle pending requests for the region.
         if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) =

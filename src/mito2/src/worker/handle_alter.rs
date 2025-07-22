@@ -17,6 +17,7 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use api::v1::SetIndex;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
@@ -37,7 +38,8 @@ use crate::region::options::CompactionOptions::Twcs;
 use crate::region::options::TwcsOptions;
 use crate::region::version::VersionRef;
 use crate::region::MitoRegionRef;
-use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
+use crate::request::{DdlRequest, OptionOutputTx, RegionBuildIndexRequest, SenderDdlRequest};
+use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -131,7 +133,20 @@ impl<S> RegionWorkerLoop<S> {
             "Try to alter region {}, version.metadata: {:?}, request: {:?}",
             region_id, version.metadata, request,
         );
-        self.handle_alter_region_metadata(region, version, request, sender);
+
+        self.handle_alter_region_metadata(region, version, request.clone(), sender);
+        // Rebuild indexes for index change.
+        match request.kind {
+            AlterKind::SetIndex { options: _ } | AlterKind::UnsetIndex { options: _ } => {
+                self.handle_rebuild_index(RegionBuildIndexRequest {
+                    region_id,
+                    build_type: IndexBuildType::SchemaChange,
+                    file_metas: Vec::new(),
+                })
+                .await;
+            }
+            _ => {}
+        }
     }
 
     /// Handles region metadata changes.
@@ -149,6 +164,7 @@ impl<S> RegionWorkerLoop<S> {
                 return;
             }
         };
+
         // Persist the metadata to region's manifest.
         let change = RegionChange { metadata: new_meta };
         self.handle_manifest_region_change(region, change, sender)

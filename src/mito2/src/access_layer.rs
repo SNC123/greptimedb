@@ -35,7 +35,7 @@ use crate::region::ManifestContextRef;
 use crate::request::WorkerRequest;
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::{IndexBuildScheduler, IndexerBuilderImpl};
 use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
@@ -100,6 +100,13 @@ impl AccessLayer {
         &self.puffin_manager_factory
     }
 
+    /// Build the puffin manager.
+    pub(crate) fn build_puffin_manager(&self) -> SstPuffinManager{
+        let store = self.object_store.clone();
+        let path_provider = RegionFilePathFactory::new(self.region_dir.clone());
+        self.puffin_manager_factory.build(store, path_provider)
+    }
+
     /// Deletes a SST file (and its index file if it has one) with given file id.
     pub(crate) async fn delete_sst(&self, file_meta: &FileMeta) -> Result<()> {
         let path = location::sst_file_path(&self.region_dir, file_meta.file_id);
@@ -133,11 +140,11 @@ impl AccessLayer {
         &self,
         request: SstWriteRequest,
         write_opts: &WriteOptions,
-    ) -> Result<SstWriteOutput> {
+    ) -> Result<SstInfoArray> {
         let region_id = request.metadata.region_id;
         let cache_manager = request.cache_manager.clone();
 
-        let sst_write_output = if let Some(write_cache) = cache_manager.write_cache() {
+        let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
             // Write to the write cache.
             write_cache
                 .write_and_upload_sst(
@@ -153,21 +160,7 @@ impl AccessLayer {
                 .await?
         } else {
             // Write cache is disabled.
-            let store = self.object_store.clone();
             let path_provider = RegionFilePathFactory::new(self.region_dir.clone());
-            let indexer_builder = IndexerBuilderImpl {
-                op_type: request.op_type,
-                metadata: request.metadata.clone(),
-                row_group_size: write_opts.row_group_size,
-                puffin_manager: self
-                    .puffin_manager_factory
-                    .build(store, path_provider.clone()),
-                intermediate_manager: self.intermediate_manager.clone(),
-                index_options: request.index_options,
-                inverted_index_config: request.inverted_index_config,
-                fulltext_index_config: request.fulltext_index_config,
-                bloom_filter_index_config: request.bloom_filter_index_config,
-            };
             // We disable write cache on file system but we still use atomic write.
             // TODO(yingwen): If we support other non-fs stores without the write cache, then
             // we may have find a way to check whether we need the cleaner.
@@ -179,15 +172,12 @@ impl AccessLayer {
             )
             .await
             .with_file_cleaner(cleaner);
-            SstWriteOutput {
-                sst_infos :  writer.write_all(request.source, request.max_sequence, write_opts).await?,
-                indexer_builder: Some(indexer_builder)
-            }        
+            writer.write_all(request.source, request.max_sequence, write_opts).await?    
         };
 
         // Put parquet metadata to cache manager.
-        if !sst_write_output.sst_infos.is_empty() {
-            for sst in &sst_write_output.sst_infos {
+        if !sst_info.is_empty() {
+            for sst in &sst_info {
                 if let Some(parquet_metadata) = &sst.file_metadata {
                     cache_manager.put_parquet_meta_data(
                         region_id,
@@ -198,7 +188,7 @@ impl AccessLayer {
             }
         }
 
-        Ok(sst_write_output)
+        Ok(sst_info)
     }
 }
 
@@ -226,25 +216,6 @@ pub struct SstWriteRequest {
     pub bloom_filter_index_config: BloomFilterConfig,
 }
 
-/// Contents to install (index)metadata
-pub struct SstWriteOutput {
-    pub  sst_infos: SstInfoArray,
-    pub(crate)  indexer_builder: Option<IndexerBuilderImpl>,
-}
-
-impl fmt::Debug for SstWriteOutput {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SstWriteOutput")
-            .field("sst_infos", &self.sst_infos)
-            .field("indexer_builder", 
-            &match self.indexer_builder {
-                None => &"None",
-                Some(_) => &"Some(...)",
-            }
-            )
-            .finish()
-    }
-}
 
 /// Cleaner to remove temp files on the atomic write dir.
 pub(crate) struct TempFileCleaner {

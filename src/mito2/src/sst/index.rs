@@ -22,27 +22,27 @@ pub mod puffin_manager;
 mod statistics;
 pub(crate) mod store;
 
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, oneshot};
 
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, warn};
-
 use puffin_manager::SstPuffinManager;
 use smallvec::SmallVec;
 use statistics::{ByteCount, RowCount};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, RegionId, SequenceNumber};
+use strum::IntoStaticStr;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 
 use crate::access_layer::{self, AccessLayerRef, OperationType};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
-use crate::error::{Result};
+use crate::error::Result;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
@@ -192,7 +192,7 @@ pub trait IndexerBuilder {
 
 #[derive(Clone)]
 pub(crate) struct IndexerBuilderImpl {
-    pub(crate) op_type: OperationType,
+    pub(crate) build_type: IndexBuildType,
     pub(crate) metadata: RegionMetadataRef,
     pub(crate) row_group_size: usize,
     pub(crate) puffin_manager: SstPuffinManager,
@@ -206,8 +206,8 @@ pub(crate) struct IndexerBuilderImpl {
 impl fmt::Debug for IndexerBuilderImpl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IndexerBuilderImpl")
-            .field("op_type", &self.op_type)
-            .field("metadata", &self.metadata) // 若 metadata 没有 Debug，可以省略细节
+            .field("build_type", &self.build_type)
+            .field("metadata", &self.metadata)
             .field("row_group_size", &self.row_group_size)
             .field("index_options", &self.index_options)
             .field("inverted_index_config", &self.inverted_index_config)
@@ -216,7 +216,6 @@ impl fmt::Debug for IndexerBuilderImpl {
             .finish()
     }
 }
-
 
 #[async_trait::async_trait]
 impl IndexerBuilder for IndexerBuilderImpl {
@@ -246,9 +245,10 @@ impl IndexerBuilder for IndexerBuilderImpl {
 
 impl IndexerBuilderImpl {
     fn build_inverted_indexer(&self, file_id: FileId) -> Option<InvertedIndexer> {
-        let create = match self.op_type {
-            OperationType::Flush => self.inverted_index_config.create_on_flush.auto(),
-            OperationType::Compact => self.inverted_index_config.create_on_compaction.auto(),
+        let create = match self.build_type {
+            IndexBuildType::Flush => self.inverted_index_config.create_on_flush.auto(),
+            IndexBuildType::Compact => self.inverted_index_config.create_on_compaction.auto(),
+            _ => true,
         };
 
         if !create {
@@ -306,9 +306,10 @@ impl IndexerBuilderImpl {
     }
 
     async fn build_fulltext_indexer(&self, file_id: FileId) -> Option<FulltextIndexer> {
-        let create = match self.op_type {
-            OperationType::Flush => self.fulltext_index_config.create_on_flush.auto(),
-            OperationType::Compact => self.fulltext_index_config.create_on_compaction.auto(),
+        let create = match self.build_type {
+            IndexBuildType::Flush => self.fulltext_index_config.create_on_flush.auto(),
+            IndexBuildType::Compact => self.fulltext_index_config.create_on_compaction.auto(),
+            _ => true,
         };
 
         if !create {
@@ -360,9 +361,10 @@ impl IndexerBuilderImpl {
     }
 
     fn build_bloom_filter_indexer(&self, file_id: FileId) -> Option<BloomFilterIndexer> {
-        let create = match self.op_type {
-            OperationType::Flush => self.bloom_filter_index_config.create_on_flush.auto(),
-            OperationType::Compact => self.bloom_filter_index_config.create_on_compaction.auto(),
+        let create = match self.build_type {
+            IndexBuildType::Flush => self.bloom_filter_index_config.create_on_flush.auto(),
+            IndexBuildType::Compact => self.bloom_filter_index_config.create_on_compaction.auto(),
+            _ => true,
         };
 
         if !create {
@@ -410,6 +412,26 @@ impl IndexerBuilderImpl {
     }
 }
 
+/// Type of an index build task.
+#[derive(Debug, IntoStaticStr, Clone)]
+pub enum IndexBuildType {
+    /// Build index when schema change.
+    SchemaChange,
+    /// Create or update index after flush.
+    Flush,
+    /// Create or update index after compact.
+    Compact,
+    /// Manually build index.
+    Manual,
+}
+
+impl IndexBuildType {
+    /// Get index build type as static str.
+    fn as_str(&self) -> &'static str {
+        self.into()
+    }
+}
+
 pub struct IndexBuildTask {
     pub file_meta: FileMeta,
     pub flushed_entry_id: Option<EntryId>,
@@ -429,14 +451,19 @@ impl IndexBuildTask {
 
     async fn do_index_build(&mut self) {
         let _ = self.index_build().await;
-    } 
+    }
 
     async fn index_build(&mut self) -> Result<()> {
         debug!("index builder file id : {}", self.file_meta.file_id);
         let mut indexer = self.indexer_builder.build(self.file_meta.file_id).await;
-        let mut parquet_reader = self.access_layer.read_sst(
-            FileHandle::new(self.file_meta.clone(), self.file_purger.clone())
-        ).build().await?; 
+        let mut parquet_reader = self
+            .access_layer
+            .read_sst(FileHandle::new(
+                self.file_meta.clone(),
+                self.file_purger.clone(),
+            ))
+            .build()
+            .await?;
 
         // TODO(hsc): optimize index batch
         while let Some(batch) = &mut parquet_reader.next_batch().await? {
@@ -450,12 +477,11 @@ impl IndexBuildTask {
         Ok(())
     }
 
-    async fn install_index_metadata(&mut self, output : IndexOutput) {
-
+    async fn install_index_metadata(&mut self, output: IndexOutput) {
         self.file_meta.available_indexes = output.build_available_indexes();
         self.file_meta.index_file_size = output.file_size;
         let edit = RegionEdit {
-            files_to_add : vec![self.file_meta.clone()],
+            files_to_add: vec![self.file_meta.clone()],
             files_to_remove: vec![],
             flushed_sequence: self.flushed_sequence,
             flushed_entry_id: self.flushed_entry_id,
@@ -463,13 +489,11 @@ impl IndexBuildTask {
         };
         debug!("send region edit request");
         let (tx, rx) = oneshot::channel();
-        let edit_request = WorkerRequest::EditRegion(
-            RegionEditRequest {
-                region_id: self.file_meta.region_id,
-                edit,
-                tx,
-            }
-        );
+        let edit_request = WorkerRequest::EditRegion(RegionEditRequest {
+            region_id: self.file_meta.region_id,
+            edit,
+            tx,
+        });
         self.send_request(edit_request).await;
         if let Ok(_) = rx.await {
             debug!("region edit finished");
@@ -477,7 +501,7 @@ impl IndexBuildTask {
     }
 
     /// Notify job status.
-    async fn send_request(&self, request: WorkerRequest) {     
+    async fn send_request(&self, request: WorkerRequest) {
         if let Err(e) = self.request_sender.send(request).await {
             warn!(
                 "Failed to notify flush job status for region {}, request: {:?}",
@@ -489,9 +513,9 @@ impl IndexBuildTask {
 
 #[derive(Clone)]
 pub struct IndexBuildScheduler {
-    // file_status: HashMap<FileId, IndexBuildStatus>, // 维护各个文件的索引构建状态
-    scheduler: SchedulerRef, 
-}   
+    // file_status: HashMap<FileId, IndexBuildStatus>,
+    scheduler: SchedulerRef,
+}
 
 impl IndexBuildScheduler {
     pub fn new(scheduler: SchedulerRef) -> Self {
@@ -500,13 +524,13 @@ impl IndexBuildScheduler {
             scheduler,
         }
     }
-    pub fn schedule_build(&mut self, task : IndexBuildTask) -> Result<()> {
+    pub fn schedule_build(&mut self, task: IndexBuildTask) -> Result<()> {
         let file_id = task.file_meta.file_id;
         debug!("receive index build task, file_id = {:?}", file_id);
         // let index_build_status = self
         //     .file_status
         //     .entry(file_id)
-        //     .or_insert_with(|| IndexBuildStatus { 
+        //     .or_insert_with(|| IndexBuildStatus {
         //         file_id,
         //         // pending_task: None,
         //         current_indexer: None,
@@ -541,7 +565,6 @@ impl IndexBuildScheduler {
 //         }
 //     }
 // }
-
 
 #[cfg(test)]
 mod tests {
@@ -671,7 +694,7 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -701,7 +724,7 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -722,7 +745,7 @@ mod tests {
         assert!(indexer.bloom_filter_indexer.is_some());
 
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Compact,
+            build_type: IndexBuildType::Compact,
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -743,7 +766,7 @@ mod tests {
         assert!(indexer.bloom_filter_indexer.is_some());
 
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Compact,
+            build_type: IndexBuildType::Compact,
             metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -776,7 +799,7 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -799,7 +822,7 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -822,7 +845,7 @@ mod tests {
             with_skipping_bloom: false,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -852,7 +875,7 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata,
             row_group_size: 0,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),

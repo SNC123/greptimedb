@@ -100,7 +100,8 @@ use crate::error::{
 use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanRegion, Scanner};
-use crate::request::{RegionEditRequest, WorkerRequest};
+use crate::request::{RegionBuildIndexRequest, RegionEditRequest, WorkerRequest};
+use crate::sst::index::IndexBuildType;
 use crate::wal::entry_distributor::{
     build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
 };
@@ -226,6 +227,20 @@ impl MitoEngine {
     #[cfg(test)]
     pub(crate) fn get_region(&self, id: RegionId) -> Option<crate::region::MitoRegionRef> {
         self.inner.workers.get_region(id)
+    }
+
+    /// Rebuild all index files manually for sst files in region.
+    pub async fn rebuild_index(&self, region_id: RegionId) -> Result<()> {
+        let request = WorkerRequest::BuildIndexRegion(RegionBuildIndexRequest {
+            region_id,
+            build_type: IndexBuildType::Manual,
+            file_metas: Vec::new(),
+        });
+        self.inner
+            .workers
+            .submit_to_worker(region_id, request)
+            .await?;
+        Ok(())
     }
 
     fn encode_manifest_info_to_extensions(
@@ -469,8 +484,8 @@ impl EngineInner {
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
         let version = region.version();
-        debug!("scan version = {:?}",version.ssts);
-        debug!("manifest version = {:?}",region.manifest_ctx);
+        debug!("scan version = {:?}", version.ssts);
+        debug!("manifest version = {:?}", region.manifest_ctx);
         // Get cache.
         let cache_manager = self.workers.cache_manager();
 
@@ -731,8 +746,8 @@ impl MitoEngine {
     }
 
     pub async fn wait_region_writable(&self, region_id: RegionId) {
-        use std::time::Duration;
         use std::thread::sleep;
+        use std::time::Duration;
 
         for _ in 0..1000 {
             if let Some(region) = self.inner.workers.get_region(region_id) {
@@ -744,7 +759,6 @@ impl MitoEngine {
         }
         panic!("Region {} did not become writable in time", region_id);
     }
-
 }
 
 #[cfg(test)]

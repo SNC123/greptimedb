@@ -50,7 +50,8 @@ use crate::manifest::action::RegionEdit;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
-use crate::sst::index::IndexerBuilderImpl;
+use crate::sst::file::{FileHandle, FileMeta};
+use crate::sst::index::{IndexBuildType, IndexerBuilderImpl};
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::wal::EntryId;
 
@@ -576,6 +577,9 @@ pub(crate) enum WorkerRequest {
     /// Use [RegionEdit] to edit a region directly.
     EditRegion(RegionEditRequest),
 
+    /// Build indexes of a region.
+    BuildIndexRegion(RegionBuildIndexRequest),
+
     /// Keep the manifest of a region up to date.
     SyncRegion(RegionSyncRequest),
 
@@ -783,8 +787,6 @@ pub(crate) struct FlushFinished {
     pub(crate) _timer: HistogramTimer,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
-    /// Indexer builders .
-    pub(crate) indexer_builders: Vec<IndexerBuilderImpl>,
     /// Memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
 }
@@ -909,6 +911,14 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RegionBuildIndexRequest {
+    pub(crate) region_id: RegionId,
+    pub(crate) build_type: IndexBuildType,
+    /// files need to build index, empty means all.
+    pub(crate) file_metas: Vec<FileMeta>,
 }
 
 #[derive(Debug)]
