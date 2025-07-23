@@ -151,6 +151,7 @@ impl RegionManifestManager {
             version,
             RegionChange {
                 metadata: metadata.clone(),
+                is_index_changed: true,
             },
         );
         let manifest = manifest_builder.try_build()?;
@@ -163,7 +164,10 @@ impl RegionManifestManager {
 
         // Persist region change.
         let action_list =
-            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange { metadata }));
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                metadata,
+                is_index_changed: true,
+            }));
         store.save(version, &action_list.encode()?).await?;
 
         let checkpointer = Checkpointer::new(region_id, options, store.clone(), MIN_VERSION);
@@ -655,6 +659,7 @@ mod test {
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
+                is_index_changed: false,
             }));
 
         let current_version = manager.update(action_list).await.unwrap();
@@ -717,6 +722,7 @@ mod test {
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
+                is_index_changed: false,
             }));
 
         let current_version = manager.update(action_list).await.unwrap();

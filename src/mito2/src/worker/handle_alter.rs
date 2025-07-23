@@ -134,19 +134,7 @@ impl<S> RegionWorkerLoop<S> {
             region_id, version.metadata, request,
         );
 
-        self.handle_alter_region_metadata(region, version, request.clone(), sender);
-        // Rebuild indexes for index change.
-        match request.kind {
-            AlterKind::SetIndex { options: _ } | AlterKind::UnsetIndex { options: _ } => {
-                self.handle_rebuild_index(RegionBuildIndexRequest {
-                    region_id,
-                    build_type: IndexBuildType::SchemaChange,
-                    file_metas: Vec::new(),
-                })
-                .await;
-            }
-            _ => {}
-        }
+        self.handle_alter_region_metadata(region, version, request, sender);
     }
 
     /// Handles region metadata changes.
@@ -157,6 +145,11 @@ impl<S> RegionWorkerLoop<S> {
         request: RegionAlterRequest,
         sender: OptionOutputTx,
     ) {
+        let is_index_changed = match request.kind.clone() {
+            AlterKind::SetIndex { options: _ } | AlterKind::UnsetIndex { options: _ } => true,
+            _ => false,
+        };
+
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -166,7 +159,10 @@ impl<S> RegionWorkerLoop<S> {
         };
 
         // Persist the metadata to region's manifest.
-        let change = RegionChange { metadata: new_meta };
+        let change = RegionChange {
+            metadata: new_meta,
+            is_index_changed,
+        };
         self.handle_manifest_region_change(region, change, sender)
     }
 

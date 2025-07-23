@@ -889,6 +889,8 @@ pub(crate) struct RegionChangeResult {
     pub(crate) sender: OptionOutputTx,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+    /// Used for index rebuild.
+    pub(crate) is_index_changed: bool,
 }
 
 /// Request to edit a region directly.

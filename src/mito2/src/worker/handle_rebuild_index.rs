@@ -25,11 +25,15 @@ impl<S> RegionWorkerLoop<S> {
         let access_layer = region.access_layer.clone();
 
         let puffin_manager = if let Some(write_cache) = self.cache_manager.write_cache() {
+            debug!("puffine manager use cache");
             write_cache.build_puffin_manager(region.region_id)
         } else {
+            debug!("puffine manager use file");
             access_layer.build_puffin_manager()
         };
 
+
+        debug!("indexer builder for metadata = {:?}", version.metadata);
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
             build_type,
             metadata: version.metadata.clone(),
