@@ -51,7 +51,9 @@ use crate::region::options::IndexOptions;
 use crate::region::ManifestContextRef;
 use crate::request::{RegionEditRequest, RegionSyncRequest, WorkerRequest};
 use crate::schedule::scheduler::{Job, LocalScheduler, SchedulerRef};
-use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange, IndexType};
+use crate::sst::file::{
+    ColumnIndexMetadata, FileHandle, FileId, FileMeta, FileTimeRange, IndexType, IndexTypes,
+};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -78,18 +80,33 @@ pub struct IndexOutput {
 }
 
 impl IndexOutput {
-    pub fn build_available_indexes(&self) -> SmallVec<[IndexType; 4]> {
-        let mut indexes = SmallVec::new();
+    pub fn build_indexes(&self) -> Vec<ColumnIndexMetadata> {
+        let mut map: HashMap<ColumnId, IndexTypes> = HashMap::new();
+
         if self.inverted_index.is_available() {
-            indexes.push(IndexType::InvertedIndex);
+            for &col in &self.inverted_index.columns {
+                map.entry(col).or_default().push(IndexType::InvertedIndex);
+            }
         }
         if self.fulltext_index.is_available() {
-            indexes.push(IndexType::FulltextIndex);
+            for &col in &self.fulltext_index.columns {
+                map.entry(col).or_default().push(IndexType::FulltextIndex);
+            }
         }
         if self.bloom_filter.is_available() {
-            indexes.push(IndexType::BloomFilterIndex);
+            for &col in &self.bloom_filter.columns {
+                map.entry(col)
+                    .or_default()
+                    .push(IndexType::BloomFilterIndex);
+            }
         }
-        indexes
+
+        map.into_iter()
+            .map(|(column_id, created_indexes)| ColumnIndexMetadata {
+                column_id,
+                created_indexes,
+            })
+            .collect::<Vec<_>>()
     }
 }
 
@@ -413,7 +430,7 @@ impl IndexerBuilderImpl {
 }
 
 /// Type of an index build task.
-#[derive(Debug, IntoStaticStr, Clone)]
+#[derive(Debug, IntoStaticStr, Clone, PartialEq)]
 pub enum IndexBuildType {
     /// Build index when schema change.
     SchemaChange,
@@ -478,7 +495,7 @@ impl IndexBuildTask {
     }
 
     async fn install_index_metadata(&mut self, output: IndexOutput) {
-        self.file_meta.available_indexes = output.build_available_indexes();
+        self.file_meta.indexes = output.build_indexes();
         self.file_meta.index_file_size = output.file_size;
         let edit = RegionEdit {
             files_to_add: vec![self.file_meta.clone()],

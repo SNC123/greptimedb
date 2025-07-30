@@ -383,7 +383,7 @@ impl RegionFlushTask {
                     time_range: sst_info.time_range,
                     level: 0,
                     file_size: sst_info.file_size,
-                    available_indexes: sst_info.index_metadata.build_available_indexes(),
+                    indexes: sst_info.index_metadata.build_indexes(),
                     index_file_size: sst_info.index_metadata.file_size,
                     num_rows: sst_info.num_rows as u64,
                     num_row_groups: sst_info.num_row_groups,

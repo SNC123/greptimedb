@@ -755,7 +755,7 @@ mod tests {
                         ),
                         level: 0,
                         file_size: *size,
-                        available_indexes: Default::default(),
+                        indexes: Default::default(),
                         index_file_size: 0,
                         num_rows: 0,
                         num_row_groups: 0,

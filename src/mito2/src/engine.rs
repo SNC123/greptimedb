@@ -229,7 +229,7 @@ impl MitoEngine {
         self.inner.workers.get_region(id)
     }
 
-    /// Rebuild all index files manually for sst files in region.
+    /// Rebuild all inconsistent index files manually for sst files in region.
     pub async fn rebuild_index(&self, region_id: RegionId) -> Result<()> {
         let request = WorkerRequest::BuildIndexRegion(RegionBuildIndexRequest {
             region_id,

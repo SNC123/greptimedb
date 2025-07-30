@@ -24,7 +24,8 @@ use common_time::Timestamp;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use snafu::{ResultExt, Snafu};
-use store_api::storage::RegionId;
+use store_api::metadata::ColumnMetadata;
+use store_api::storage::{ColumnId, RegionId};
 use uuid::Uuid;
 
 use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
@@ -34,6 +35,8 @@ use crate::sst::location;
 pub type Level = u8;
 /// Maximum level of SSTs.
 pub const MAX_LEVEL: Level = 2;
+/// Type to store index types for a column.
+pub type IndexTypes = SmallVec<[IndexType; 4]>;
 
 #[derive(Debug, Snafu, PartialEq)]
 pub struct ParseIdError {
@@ -119,8 +122,10 @@ pub struct FileMeta {
     pub level: Level,
     /// Size of the file.
     pub file_size: u64,
-    /// Available indexes of the file.
-    pub available_indexes: SmallVec<[IndexType; 4]>,
+    // /// Available indexes of the file.
+    // pub available_indexes: SmallVec<[IndexType; 4]>,
+    /// Created indexes of the file for each column.
+    pub indexes: Vec<ColumnIndexMetadata>,
     /// Size of the index file.
     pub index_file_size: u64,
     /// Number of rows in the file.
@@ -153,29 +158,86 @@ pub enum IndexType {
     BloomFilterIndex,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ColumnIndexMetadata {
+    pub column_id: ColumnId,
+    pub created_indexes: IndexTypes,
+}
+
 impl FileMeta {
     pub fn exists_index(&self) -> bool {
-        !self.available_indexes.is_empty()
+        !self.indexes.is_empty()
     }
 
     /// Returns true if the file has an inverted index
     pub fn inverted_index_available(&self) -> bool {
-        self.available_indexes.contains(&IndexType::InvertedIndex)
+        for index in &self.indexes {
+            if index.created_indexes.contains(&IndexType::InvertedIndex) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Returns true if the file has a fulltext index
     pub fn fulltext_index_available(&self) -> bool {
-        self.available_indexes.contains(&IndexType::FulltextIndex)
+        for index in &self.indexes {
+            if index.created_indexes.contains(&IndexType::FulltextIndex) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Returns true if the file has a bloom filter index.
     pub fn bloom_filter_index_available(&self) -> bool {
-        self.available_indexes
-            .contains(&IndexType::BloomFilterIndex)
+        for index in &self.indexes {
+            if index.created_indexes.contains(&IndexType::BloomFilterIndex) {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn index_file_size(&self) -> u64 {
         self.index_file_size
+    }
+    /// Check whether the file index is consistent with the given region metadata.
+    pub fn is_index_consistent_with_region(&self, metadata: &[ColumnMetadata]) -> bool {
+        let id_to_indexes = self
+            .indexes
+            .iter()
+            .map(|index| (index.column_id, index.created_indexes.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        for column in metadata {
+            if !column.column_schema.is_inverted_indexed()
+                && !column.column_schema.is_fulltext_indexed()
+                && !column.column_schema.is_skipping_indexed()
+            {
+                continue;
+            }
+            if let Some(indexes) = id_to_indexes.get(&column.column_id) {
+                if column.column_schema.is_inverted_indexed()
+                    && !indexes.contains(&IndexType::InvertedIndex)
+                {
+                    return false;
+                }
+                if column.column_schema.is_fulltext_indexed()
+                    && !indexes.contains(&IndexType::FulltextIndex)
+                {
+                    return false;
+                }
+                if column.column_schema.is_skipping_indexed()
+                    && !indexes.contains(&IndexType::BloomFilterIndex)
+                {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -189,8 +251,8 @@ impl fmt::Debug for FileHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileHandle")
             .field("region_id", &self.inner.meta.region_id)
-            .field("file_index", &self.inner.meta.available_indexes)
-            .field("index_file_size",&self.inner.meta.index_file_size)
+            .field("file_index", &self.inner.meta.indexes)
+            .field("index_file_size", &self.inner.meta.index_file_size)
             .field("file_id", &self.inner.meta.file_id)
             .field("time_range", &self.inner.meta.time_range)
             .field("size", &self.inner.meta.file_size)
@@ -340,7 +402,10 @@ mod tests {
             time_range: FileTimeRange::default(),
             level,
             file_size: 0,
-            available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            }],
             index_file_size: 0,
             num_rows: 0,
             num_row_groups: 0,
@@ -360,7 +425,7 @@ mod tests {
     fn test_deserialize_from_string() {
         let json_file_meta = "{\"region_id\":0,\"file_id\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55\",\
         \"time_range\":[{\"value\":0,\"unit\":\"Millisecond\"},{\"value\":0,\"unit\":\"Millisecond\"}],\
-        \"available_indexes\":[\"InvertedIndex\"],\"level\":0}";
+        \"indexes\":[{\"column_id\":0,\"created_indexes:\":\"InvertedIndex\"}]],\"level\":0}";
         let file_meta = create_file_meta(
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
             0,
