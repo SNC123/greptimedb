@@ -286,7 +286,8 @@ mod tests {
                 "primary_key":[1],
                 "region_id":5299989648942,
                 "schema_version":0
-            }
+            },
+            "is_index_changed":false
             }"#;
         let _ = serde_json::from_str::<RegionChange>(region_change).unwrap();
 

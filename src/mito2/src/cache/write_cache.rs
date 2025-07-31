@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
@@ -24,9 +23,11 @@ use futures::AsyncWriteExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
+use tokio::sync::mpsc;
 
 use crate::access_layer::{
-    new_fs_cache_store, FilePathProvider, RegionFilePathFactory, SstInfoArray, SstWriteRequest, TempFileCleaner, WriteCachePathProvider
+    new_fs_cache_store, FilePathProvider, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
+    TempFileCleaner, WriteCachePathProvider,
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
@@ -104,7 +105,7 @@ impl WriteCache {
     }
 
     /// Build the puffin manager with given region id
-    pub(crate) fn build_puffin_manager(&self, region_id: RegionId) -> SstPuffinManager{
+    pub(crate) fn build_puffin_manager(&self, region_id: RegionId) -> SstPuffinManager {
         let store = self.file_cache.local_store();
         let path_provider = WriteCachePathProvider::new(region_id, self.file_cache.clone());
         self.puffin_manager_factory.build(store, path_provider)
@@ -160,18 +161,6 @@ impl WriteCache {
                 break;
             }
             upload_tracker.push_uploaded_file(parquet_path);
-
-            if sst.index_metadata.file_size > 0 {
-                let puffin_key = IndexKey::new(region_id, sst.file_id, FileType::Puffin);
-                let puffin_path = upload_request
-                    .dest_path_provider
-                    .build_index_file_path(sst.file_id);
-                if let Err(e) = self.upload(puffin_key, &puffin_path, remote_store).await {
-                    err = Some(e);
-                    break;
-                }
-                upload_tracker.push_uploaded_file(puffin_path);
-            }
         }
 
         if let Some(err) = err {
@@ -281,7 +270,7 @@ impl WriteCache {
     }
 
     /// Uploads a Parquet file or a Puffin file to the remote object store.
-    async fn upload(
+    pub(crate) async fn upload(
         &self,
         index_key: IndexKey,
         upload_path: &str,
@@ -368,7 +357,7 @@ pub struct SstUploadRequest {
 }
 
 /// A structs to track files to upload and clean them if upload failed.
-struct UploadTracker {
+pub(crate) struct UploadTracker {
     /// Id of the region to track.
     region_id: RegionId,
     /// Paths of files uploaded successfully.
@@ -377,7 +366,7 @@ struct UploadTracker {
 
 impl UploadTracker {
     /// Creates a new instance of `UploadTracker` for a given region.
-    fn new(region_id: RegionId) -> Self {
+    pub(crate) fn new(region_id: RegionId) -> Self {
         Self {
             region_id,
             files_uploaded: Vec::new(),
@@ -385,12 +374,12 @@ impl UploadTracker {
     }
 
     /// Add a file path to the list of uploaded files.
-    fn push_uploaded_file(&mut self, path: String) {
+    pub(crate) fn push_uploaded_file(&mut self, path: String) {
         self.files_uploaded.push(path);
     }
 
     /// Cleans uploaded files and files in the file cache at best effort.
-    async fn clean(
+    pub(crate) async fn clean(
         &self,
         sst_info: &SstInfoArray,
         file_cache: &FileCacheRef,
@@ -491,18 +480,13 @@ mod tests {
 
         // Write to cache and upload sst to mock remote store
         let sst_info = write_cache
-            .write_and_upload_sst(
-                write_request, 
-                upload_request, 
-                &write_opts, 
-            )
+            .write_and_upload_sst(write_request, upload_request, &write_opts)
             .await
             .unwrap()
             .remove(0); //todo(hl): we assume it only creates one file.
 
         let file_id = sst_info.file_id;
         let sst_upload_path = path_provider.build_sst_file_path(file_id);
-        let index_upload_path = path_provider.build_index_file_path(file_id);
 
         // Check write cache contains the key
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
@@ -515,24 +499,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remote_data.to_vec(), cache_data.to_vec());
-        sleep(Duration::from_secs(3)).await;
-        // Check write cache contains the index key
-        let index_key = IndexKey::new(region_id, file_id, FileType::Puffin);
-        assert!(write_cache.file_cache.contains_key(&index_key));
-
-        let remote_index_data = mock_store.read(&index_upload_path).await.unwrap();
-        let cache_index_data = local_store
-            .read(&write_cache.file_cache.cache_file_path(index_key))
-            .await
-            .unwrap();
-        assert_eq!(remote_index_data.to_vec(), cache_index_data.to_vec());
 
         // Removes the file from the cache.
         let sst_index_key = IndexKey::new(region_id, file_id, FileType::Parquet);
         write_cache.remove(sst_index_key).await;
         assert!(!write_cache.file_cache.contains_key(&sst_index_key));
-        write_cache.remove(index_key).await;
-        assert!(!write_cache.file_cache.contains_key(&index_key));
     }
 
     #[tokio::test]
@@ -587,11 +558,7 @@ mod tests {
         };
 
         let sst_info = write_cache
-            .write_and_upload_sst(
-                write_request, 
-                upload_request, 
-                &write_opts, 
-            )
+            .write_and_upload_sst(write_request, upload_request, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -664,11 +631,7 @@ mod tests {
         };
 
         write_cache
-            .write_and_upload_sst(
-                write_request, 
-                upload_request, 
-                &write_opts, 
-            )
+            .write_and_upload_sst(write_request, upload_request, &write_opts)
             .await
             .unwrap_err();
         let atomic_write_dir = write_cache_dir.path().join(ATOMIC_WRITE_DIR);

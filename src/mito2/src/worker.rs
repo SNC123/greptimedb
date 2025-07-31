@@ -128,6 +128,8 @@ pub(crate) struct WorkerGroup {
     flush_job_pool: SchedulerRef,
     /// Compaction background job pool.
     compact_job_pool: SchedulerRef,
+    /// Scheduler for index build jobs.
+    index_build_job_pool: SchedulerRef,
     /// Scheduler for file purgers.
     purge_scheduler: SchedulerRef,
     /// Cache.
@@ -216,6 +218,7 @@ impl WorkerGroup {
             workers,
             flush_job_pool,
             compact_job_pool,
+            index_build_job_pool,
             purge_scheduler,
             cache_manager,
         })
@@ -358,6 +361,7 @@ impl WorkerGroup {
             workers,
             flush_job_pool,
             compact_job_pool,
+            index_build_job_pool,
             purge_scheduler,
             cache_manager,
         })

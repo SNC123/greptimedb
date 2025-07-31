@@ -51,6 +51,7 @@ impl<S> RegionWorkerLoop<S> {
             flushed_entry_id: Some(version.flushed_entry_id),
             flushed_sequence: Some(version.flushed_sequence),
             access_layer: access_layer.clone(),
+            write_cache: self.cache_manager.write_cache().cloned(),
             file_purger: file.file_purger(),
             request_sender: self.sender.clone(),
             indexer_builder: indexer_builder_ref.clone(),

@@ -425,7 +425,7 @@ mod tests {
     fn test_deserialize_from_string() {
         let json_file_meta = "{\"region_id\":0,\"file_id\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55\",\
         \"time_range\":[{\"value\":0,\"unit\":\"Millisecond\"},{\"value\":0,\"unit\":\"Millisecond\"}],\
-        \"indexes\":[{\"column_id\":0,\"created_indexes:\":\"InvertedIndex\"}]],\"level\":0}";
+        \"indexes\":[{\"column_id\":0,\"created_indexes\":[\"InvertedIndex\"]}],\"level\":0}";
         let file_meta = create_file_meta(
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
             0,

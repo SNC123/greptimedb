@@ -119,11 +119,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         change_result.sender.send(change_result.result.map(|_| 0));
 
         // Rebuild index after index metadata changed.
-        self.handle_rebuild_index(RegionBuildIndexRequest {
-            region_id: region.region_id,
-            build_type: IndexBuildType::SchemaChange,
-            file_metas: Vec::new(),
-        }).await;
+        if change_result.is_index_changed {
+            self.handle_rebuild_index(RegionBuildIndexRequest {
+                region_id: region.region_id,
+                build_type: IndexBuildType::SchemaChange,
+                file_metas: Vec::new(),
+            }).await;
+        }
 
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&change_result.region_id)

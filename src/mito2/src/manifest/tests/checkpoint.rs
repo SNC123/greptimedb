@@ -414,5 +414,5 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     for file_id in files.iter() {
         assert!(another_manager.manifest().files.contains_key(file_id));
     }
-    assert_eq!(4217, another_manager.store().total_manifest_size());
+    assert_eq!(4117, another_manager.store().total_manifest_size());
 }

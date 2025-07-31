@@ -31,7 +31,7 @@ use std::time::Duration;
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, warn};
 use puffin_manager::SstPuffinManager;
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use statistics::{ByteCount, RowCount};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, RegionId, SequenceNumber};
@@ -40,7 +40,11 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 
-use crate::access_layer::{self, AccessLayerRef, OperationType};
+use crate::access_layer::{
+    self, AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory, SstInfoArray,
+};
+use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::write_cache::{self, UploadTracker, WriteCacheRef};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::Result;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
@@ -48,7 +52,7 @@ use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::{Batch, BatchReader};
 use crate::region::options::IndexOptions;
-use crate::region::ManifestContextRef;
+use crate::region::{self, ManifestContextRef};
 use crate::request::{RegionEditRequest, RegionSyncRequest, WorkerRequest};
 use crate::schedule::scheduler::{Job, LocalScheduler, SchedulerRef};
 use crate::sst::file::{
@@ -58,6 +62,7 @@ use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
+use crate::sst::parquet::SstInfo;
 use crate::wal::EntryId;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
@@ -441,19 +446,12 @@ pub enum IndexBuildType {
     /// Manually build index.
     Manual,
 }
-
-impl IndexBuildType {
-    /// Get index build type as static str.
-    fn as_str(&self) -> &'static str {
-        self.into()
-    }
-}
-
 pub struct IndexBuildTask {
     pub file_meta: FileMeta,
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
     pub access_layer: AccessLayerRef,
+    pub write_cache: Option<WriteCacheRef>,
     pub file_purger: FilePurgerRef,
     pub indexer_builder: Arc<dyn IndexerBuilder + Send + Sync>,
     pub(crate) request_sender: Sender<WorkerRequest>,
@@ -489,9 +487,48 @@ impl IndexBuildTask {
 
         let index_output = indexer.finish().await;
         if index_output.file_size > 0 {
+            self.upload_index_file(index_output.clone()).await;
             self.install_index_metadata(index_output).await;
         }
         Ok(())
+    }
+
+    async fn upload_index_file(&self, output: IndexOutput) {
+        if let Some(write_cache) = &self.write_cache {
+            let file_id = self.file_meta.file_id;
+            let region_id = self.file_meta.region_id;
+            let remote_store = self.access_layer.object_store();
+            let mut upload_tracker = UploadTracker::new(region_id);
+            let mut err = None;
+            let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
+            let puffin_path =
+                RegionFilePathFactory::new(self.access_layer.region_dir().to_string())
+                    .build_index_file_path(file_id);
+            if let Err(e) = write_cache
+                .upload(puffin_key, &puffin_path, remote_store)
+                .await
+            {
+                err = Some(e);
+            }
+            upload_tracker.push_uploaded_file(puffin_path);
+            if let Some(_) = err {
+                // Cleans index files on failure.
+                upload_tracker
+                    .clean(
+                        &smallvec![SstInfo {
+                            file_id,
+                            index_metadata: output,
+                            ..Default::default()
+                        }],
+                        &write_cache.file_cache(),
+                        remote_store,
+                    )
+                    .await;
+                return;
+            }
+        } else {
+            debug!("write cache is not available, skip uploading index file");
+        }
     }
 
     async fn install_index_metadata(&mut self, output: IndexOutput) {
