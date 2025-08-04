@@ -235,6 +235,8 @@ impl WorkerGroup {
         self.flush_job_pool.stop(true).await?;
         // Stops the purge scheduler gracefully.
         self.purge_scheduler.stop(true).await?;
+        // Stops the index build job pool gracefully.
+        self.index_build_job_pool.stop(true).await?;
 
         try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
 
