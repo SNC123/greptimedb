@@ -978,6 +978,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_flush_finished(region_id, req).await
             }
             BackgroundNotify::FlushFailed(req) => self.handle_flush_failed(region_id, req).await,
+            BackgroundNotify::IndexBuildFinished(req) => {
+                self.handle_index_build_finished(region_id, req).await
+            }
+            BackgroundNotify::IndexBuildFailed(req) => self.handle_index_build_failed(region_id, req).await,
             BackgroundNotify::CompactionFinished(req) => {
                 self.handle_compaction_finished(region_id, req).await
             }

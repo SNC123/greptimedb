@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use puffin::puffin_manager;
+use store_api::storage::RegionId;
 
 use crate::access_layer::{self, OperationType};
 use crate::cache::write_cache;
 use crate::error::RegionNotFoundSnafu;
 use crate::region::{MitoRegion, MitoRegionRef};
-use crate::request::{self, RegionBuildIndexRequest};
+use crate::request::{self, IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::index::{IndexBuildTask, IndexBuildType, IndexerBuilderImpl};
 use crate::sst::parquet::WriteOptions;
@@ -35,7 +36,7 @@ impl<S> RegionWorkerLoop<S> {
 
         debug!("indexer builder for metadata = {:?}", version.metadata);
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
-            build_type,
+            build_type: build_type.clone(),
             metadata: version.metadata.clone(),
             inverted_index_config: self.config.inverted_index.clone(),
             fulltext_index_config: self.config.fulltext_index.clone(),
@@ -48,10 +49,12 @@ impl<S> RegionWorkerLoop<S> {
 
         IndexBuildTask {
             file_meta: file.meta_ref().clone(),
+            reason: build_type,
             flushed_entry_id: Some(version.flushed_entry_id),
             flushed_sequence: Some(version.flushed_sequence),
             access_layer: access_layer.clone(),
             write_cache: self.cache_manager.write_cache().cloned(),
+            manifest_ctx: region.manifest_ctx.clone(),
             file_purger: file.file_purger(),
             request_sender: self.sender.clone(),
             indexer_builder: indexer_builder_ref.clone(),
@@ -107,5 +110,32 @@ impl<S> RegionWorkerLoop<S> {
                     request.build_type.clone(),
                 ));
         }
+    }
+
+    pub(crate) async fn handle_index_build_finished(
+        &mut self,
+        region_id: RegionId,
+        request: IndexBuildFinished
+    ) {
+        let region = match self.regions.get_region(region_id) {
+            Some(region) => region,
+            None => {
+                warn!("Region not found for index build finished, region_id: {}", region_id);
+                return;
+            }
+        };
+        region.version_control.apply_edit(
+            request.edit.clone(),
+            &[],
+            region.file_purger.clone(),
+        );
+    }
+
+    pub(crate) async fn handle_index_build_failed(
+        &mut self,
+        region_id: RegionId,
+        request: IndexBuildFailed,
+    ) {
+        // todo!("index build failed handling not implemented yet");
     }
 }

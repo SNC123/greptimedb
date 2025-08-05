@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bloom_filter::creator::BloomFilterIndexer;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, error, warn};
 use puffin_manager::SstPuffinManager;
 use smallvec::{smallvec, SmallVec};
 use statistics::{ByteCount, RowCount};
@@ -52,8 +52,11 @@ use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::{Batch, BatchReader};
 use crate::region::options::IndexOptions;
-use crate::region::{self, ManifestContextRef};
-use crate::request::{RegionEditRequest, RegionSyncRequest, WorkerRequest};
+use crate::region::{self, ManifestContextRef, RegionLeaderState};
+use crate::request::{
+    BackgroundNotify, IndexBuildFailed, IndexBuildFinished, RegionEditRequest, RegionSyncRequest,
+    WorkerRequest,
+};
 use crate::schedule::scheduler::{Job, LocalScheduler, SchedulerRef};
 use crate::sst::file::{
     ColumnIndexMetadata, FileHandle, FileId, FileMeta, FileTimeRange, IndexType, IndexTypes,
@@ -446,12 +449,26 @@ pub enum IndexBuildType {
     /// Manually build index.
     Manual,
 }
+
+impl IndexBuildType {
+    /// Get index build type as a string.
+    fn as_str(&self) -> &'static str {
+        match self {
+            IndexBuildType::SchemaChange => "schema change",
+            IndexBuildType::Flush => "flush",
+            IndexBuildType::Compact => "compact",
+            IndexBuildType::Manual => "manual",
+        }
+    }
+}
 pub struct IndexBuildTask {
     pub file_meta: FileMeta,
+    pub reason: IndexBuildType,
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
     pub access_layer: AccessLayerRef,
     pub write_cache: Option<WriteCacheRef>,
+    pub(crate) manifest_ctx: ManifestContextRef,
     pub file_purger: FilePurgerRef,
     pub indexer_builder: Arc<dyn IndexerBuilder + Send + Sync>,
     pub(crate) request_sender: Sender<WorkerRequest>,
@@ -488,7 +505,27 @@ impl IndexBuildTask {
         let index_output = indexer.finish().await;
         if index_output.file_size > 0 {
             self.upload_index_file(index_output.clone()).await;
-            self.install_index_metadata(index_output).await;
+            let worker_request = match self.update_manifest(index_output).await {
+                Ok(edit) => {
+                    let index_build_finished = IndexBuildFinished {
+                        region_id: self.file_meta.region_id,
+                        edit: edit,
+                    };
+                    WorkerRequest::Background {
+                        region_id: self.file_meta.region_id,
+                        notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
+                    }
+                }
+                Err(e) => {
+                    error!(e; "Failed to update index manifest {}", self.file_meta.file_id);
+                    let err = Arc::new(e);
+                    WorkerRequest::Background {
+                        region_id: self.file_meta.region_id,
+                        notify: BackgroundNotify::IndexBuildFailed(IndexBuildFailed { err }),
+                    }
+                }
+            };
+            let _ = self.request_sender.send(worker_request).await;
         }
         Ok(())
     }
@@ -531,7 +568,7 @@ impl IndexBuildTask {
         }
     }
 
-    async fn install_index_metadata(&mut self, output: IndexOutput) {
+    async fn update_manifest(&mut self, output: IndexOutput) -> Result<RegionEdit> {
         self.file_meta.indexes = output.build_indexes();
         self.file_meta.index_file_size = output.file_size;
         let edit = RegionEdit {
@@ -542,27 +579,30 @@ impl IndexBuildTask {
             compaction_time_window: None,
         };
         debug!("send region edit request");
-        let (tx, rx) = oneshot::channel();
-        let edit_request = WorkerRequest::EditRegion(RegionEditRequest {
-            region_id: self.file_meta.region_id,
-            edit,
-            tx,
-        });
-        self.send_request(edit_request).await;
-        if let Ok(_) = rx.await {
-            debug!("region edit finished");
-        }
+        let version = self
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone())),
+            )
+            .await?;
+        debug!(
+            "Successfully update manifest version to {version}, region: {}, reason: {}",
+            self.file_meta.region_id,
+            self.reason.as_str()
+        );
+        Ok(edit)
     }
 
-    /// Notify job status.
-    async fn send_request(&self, request: WorkerRequest) {
-        if let Err(e) = self.request_sender.send(request).await {
-            warn!(
-                "Failed to notify flush job status for region {}, request: {:?}",
-                self.file_meta.region_id, e.0
-            );
-        }
-    }
+    // /// Notify job status.
+    // async fn send_request(&self, request: WorkerRequest) {
+    //     if let Err(e) = self.request_sender.send(request).await {
+    //         warn!(
+    //             "Failed to notify flush job status for region {}, request: {:?}",
+    //             self.file_meta.region_id, e.0
+    //         );
+    //     }
+    // }
 }
 
 #[derive(Clone)]

@@ -762,6 +762,10 @@ pub(crate) enum BackgroundNotify {
     FlushFinished(FlushFinished),
     /// Flush has failed.
     FlushFailed(FlushFailed),
+    /// Index build has finished.
+    IndexBuildFinished(IndexBuildFinished),
+    /// Index build has failed.
+    IndexBuildFailed(IndexBuildFailed),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
     /// Compaction has failed.
@@ -815,6 +819,19 @@ impl OnFailure for FlushFinished {
 #[derive(Debug)]
 pub(crate) struct FlushFailed {
     /// The error source of the failure.
+    pub(crate) err: Arc<Error>,
+}
+
+/// Notifies an index build job is finished.
+#[derive(Debug)]
+pub(crate) struct IndexBuildFinished {
+    pub(crate) region_id: RegionId,
+    pub(crate) edit: RegionEdit,
+}
+
+/// Notifies an index build job has failed.
+#[derive(Debug)]
+pub(crate) struct IndexBuildFailed {
     pub(crate) err: Arc<Error>,
 }
 
