@@ -12,6 +12,7 @@ use crate::region::{MitoRegion, MitoRegionRef};
 use crate::request::{self, IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::index::{IndexBuildTask, IndexBuildType, IndexerBuilderImpl};
+use crate::sst::location::{self, sst_file_path};
 use crate::sst::parquet::WriteOptions;
 use crate::worker::RegionWorkerLoop;
 
@@ -32,7 +33,6 @@ impl<S> RegionWorkerLoop<S> {
             debug!("puffine manager use file");
             access_layer.build_puffin_manager()
         };
-
 
         debug!("indexer builder for metadata = {:?}", version.metadata);
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
@@ -87,7 +87,11 @@ impl<S> RegionWorkerLoop<S> {
                 all_files
                     .values()
                     // Find all files whose index is inconsistent with the region metadata.
-                    .filter(|file| !file.meta_ref().is_index_consistent_with_region(&version.metadata.column_metadatas))
+                    .filter(|file| {
+                        !file
+                            .meta_ref()
+                            .is_index_consistent_with_region(&version.metadata.column_metadatas)
+                    })
                     .cloned()
                     .collect::<Vec<_>>()
             } else {
@@ -115,20 +119,50 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_index_build_finished(
         &mut self,
         region_id: RegionId,
-        request: IndexBuildFinished
+        request: IndexBuildFinished,
     ) {
         let region = match self.regions.get_region(region_id) {
             Some(region) => region,
             None => {
-                warn!("Region not found for index build finished, region_id: {}", region_id);
+                warn!(
+                    "Region not found for index build finished, region_id: {}",
+                    region_id
+                );
                 return;
             }
         };
-        region.version_control.apply_edit(
-            request.edit.clone(),
-            &[],
-            region.file_purger.clone(),
-        );
+        let version = region.version();
+
+        for file_meta in &request.edit.files_to_add {
+            let file_id = file_meta.file_id;
+
+            // Check if the file exists in the region version.
+            let found_in_version = version
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files.iter())
+                .any(|(id, handle)| *id == file_id && !handle.is_deleted());
+            if !found_in_version {
+                warn!(
+                    "File id {} not found in region version for index build, region: {}",
+                    file_id, region_id
+                );
+                return;
+            }
+
+            // Check if the file exists in the object store.
+            let path = location::sst_file_path(region.access_layer.region_dir(), file_meta.file_id);
+            region.access_layer.object_store().exists(&path).await.map_err(|e| {
+                warn!(e; "SST file not found for index build, region: {}, file_id: {}", region_id, file_meta.file_id);
+                return;
+            }).ok();
+        }
+
+        // Safety: The corresponding file exists.
+        region
+            .version_control
+            .apply_edit(request.edit.clone(), &[], region.file_purger.clone());
     }
 
     pub(crate) async fn handle_index_build_failed(
