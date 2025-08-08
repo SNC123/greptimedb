@@ -65,6 +65,7 @@ use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
+use crate::sst::location;
 use crate::sst::parquet::SstInfo;
 use crate::wal::EntryId;
 
@@ -92,22 +93,26 @@ impl IndexOutput {
         let mut map: HashMap<ColumnId, IndexTypes> = HashMap::new();
 
         if self.inverted_index.is_available() {
+            debug!("build inverted index");
             for &col in &self.inverted_index.columns {
                 map.entry(col).or_default().push(IndexType::InvertedIndex);
             }
         }
         if self.fulltext_index.is_available() {
+            debug!("build fulltext index");
             for &col in &self.fulltext_index.columns {
                 map.entry(col).or_default().push(IndexType::FulltextIndex);
             }
         }
         if self.bloom_filter.is_available() {
+            debug!("build bloom filter index");
             for &col in &self.bloom_filter.columns {
                 map.entry(col)
                     .or_default()
                     .push(IndexType::BloomFilterIndex);
             }
         }
+        debug!("indexes map = {:?}", map);
 
         map.into_iter()
             .map(|(column_id, created_indexes)| ColumnIndexMetadata {
@@ -485,17 +490,44 @@ impl IndexBuildTask {
         let _ = self.index_build().await;
     }
 
+    async fn check_sst_file_exists(&self) -> bool {
+        let sst_path = location::sst_file_path(self.access_layer.region_dir(), self.file_meta.file_id);
+        match self.access_layer.object_store().exists(&sst_path).await {
+            Ok(exists) => {
+                if !exists {
+                    warn!(
+                        "SST file not found during index build, skipping. region: {}, file_id: {}",
+                        self.file_meta.region_id, self.file_meta.file_id
+                    );
+                }
+                exists
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to check SST file existence during index build, skipping. region: {}, file_id: {}, error: {:?}",
+                    self.file_meta.region_id, self.file_meta.file_id, e
+                );
+                false 
+            }
+        }
+    }
+
     async fn index_build(&mut self) -> Result<()> {
         debug!("index builder file id : {}", self.file_meta.file_id);
+
         let mut indexer = self.indexer_builder.build(self.file_meta.file_id).await;
         let mut parquet_reader = self
-            .access_layer
-            .read_sst(FileHandle::new(
-                self.file_meta.clone(),
-                self.file_purger.clone(),
-            ))
+        .access_layer
+        .read_sst(FileHandle::new(
+            self.file_meta.clone(),
+            self.file_purger.clone(),
+        ))
             .build()
             .await?;
+        
+        if !self.check_sst_file_exists().await {
+            return Ok(())
+        }
 
         // TODO(hsc): optimize index batch
         while let Some(batch) = &mut parquet_reader.next_batch().await? {
@@ -504,26 +536,48 @@ impl IndexBuildTask {
 
         let index_output = indexer.finish().await;
         if index_output.file_size > 0 {
+
+            if !self.check_sst_file_exists().await {
+                return Ok(())
+            }
+
             self.upload_index_file(index_output.clone()).await;
-            let worker_request = match self.update_manifest(index_output).await {
-                Ok(edit) => {
-                    let index_build_finished = IndexBuildFinished {
-                        region_id: self.file_meta.region_id,
-                        edit: edit,
-                    };
-                    WorkerRequest::Background {
-                        region_id: self.file_meta.region_id,
-                        notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
-                    }
-                }
-                Err(e) => {
-                    error!(e; "Failed to update index manifest {}", self.file_meta.file_id);
-                    let err = Arc::new(e);
-                    WorkerRequest::Background {
-                        region_id: self.file_meta.region_id,
-                        notify: BackgroundNotify::IndexBuildFailed(IndexBuildFailed { err }),
-                    }
-                }
+            // let worker_request = match self.update_manifest(index_output).await {
+            //     Ok(edit) => {
+            //         let index_build_finished = IndexBuildFinished {
+            //             region_id: self.file_meta.region_id,
+            //             edit: edit,
+            //         };
+            //         WorkerRequest::Background {
+            //             region_id: self.file_meta.region_id,
+            //             notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
+            //         }
+            //     }
+            //     Err(e) => {
+            //         error!(e; "Failed to update index manifest {}", self.file_meta.file_id);
+            //         let err = Arc::new(e);
+            //         WorkerRequest::Background {
+            //             region_id: self.file_meta.region_id,
+            //             notify: BackgroundNotify::IndexBuildFailed(IndexBuildFailed { err }),
+            //         }
+            //     }
+            // };
+            self.file_meta.indexes = index_output.build_indexes();
+            self.file_meta.index_file_size = index_output.file_size;
+            let edit = RegionEdit {
+                files_to_add: vec![self.file_meta.clone()],
+                files_to_remove: vec![],
+                flushed_sequence: self.flushed_sequence,
+                flushed_entry_id: self.flushed_entry_id,
+                compaction_time_window: None,
+            };
+            let index_build_finished = IndexBuildFinished {
+                region_id: self.file_meta.region_id,
+                edit: edit,
+            };
+            let worker_request = WorkerRequest::Background { 
+                region_id: self.file_meta.region_id,
+                notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
             };
             let _ = self.request_sender.send(worker_request).await;
         }

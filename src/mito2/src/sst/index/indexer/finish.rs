@@ -39,6 +39,8 @@ impl Indexer {
         if !success {
             self.do_abort().await;
             return IndexOutput::default();
+        } else {
+            debug!("finish inverted index");
         }
 
         let success = self
@@ -47,12 +49,16 @@ impl Indexer {
         if !success {
             self.do_abort().await;
             return IndexOutput::default();
+        } else {
+            debug!("finish fulltext index");
         }
 
         let success = self.do_finish_bloom_filter(&mut writer, &mut output).await;
         if !success {
             self.do_abort().await;
             return IndexOutput::default();
+        } else {
+            debug!("finish bloom filter index");
         }
 
         output.file_size = self.do_finish_puffin_writer(writer).await;

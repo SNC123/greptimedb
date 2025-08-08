@@ -86,13 +86,15 @@ impl<S> RegionWorkerLoop<S> {
         // compaction finished.
         request.on_success();
 
-        // Create indexes after compact.
-        self.handle_rebuild_index(RegionBuildIndexRequest {
-            region_id,
-            build_type: IndexBuildType::Compact,
-            file_metas: index_build_file_metas,
-        })
-        .await;
+        // Create indexes after compact if new files are created.
+        if !index_build_file_metas.is_empty() {            
+            self.handle_rebuild_index(RegionBuildIndexRequest {
+                region_id,
+                build_type: IndexBuildType::Compact,
+                file_metas: index_build_file_metas,
+            })
+            .await;
+        }
 
         // Schedule next compaction if necessary.
         self.compaction_scheduler

@@ -8,7 +8,8 @@ use store_api::storage::RegionId;
 use crate::access_layer::{self, OperationType};
 use crate::cache::write_cache;
 use crate::error::RegionNotFoundSnafu;
-use crate::region::{MitoRegion, MitoRegionRef};
+use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
+use crate::region::{MitoRegion, MitoRegionRef, RegionLeaderState};
 use crate::request::{self, IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::index::{IndexBuildTask, IndexBuildType, IndexerBuilderImpl};
@@ -142,7 +143,7 @@ impl<S> RegionWorkerLoop<S> {
                 .levels()
                 .iter()
                 .flat_map(|level| level.files.iter())
-                .any(|(id, handle)| *id == file_id && !handle.is_deleted());
+                .any(|(id, handle)| *id == file_id && !handle.is_deleted() && !handle.compacting());
             if !found_in_version {
                 warn!(
                     "File id {} not found in region version for index build, region: {}",
@@ -160,9 +161,33 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Safety: The corresponding file exists.
-        region
-            .version_control
-            .apply_edit(request.edit.clone(), &[], region.file_purger.clone());
+        let version_result = region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(request.edit.clone())),
+            )
+            .await;
+
+        match version_result {
+            Ok(version) => {
+                debug!(
+                    "Successfully update manifest version to {version}, region: {region_id}, reason : index build"
+                );
+                region.version_control.apply_edit(
+                    request.edit.clone(),
+                    &[],
+                    region.file_purger.clone(),
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to update manifest for index build, region: {}, error: {:?}",
+                    region_id, e
+                );
+                return;
+            }
+        }
     }
 
     pub(crate) async fn handle_index_build_failed(
