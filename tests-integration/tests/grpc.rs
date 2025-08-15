@@ -657,8 +657,16 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .unwrap()
         .into_inner()
         .body;
-    let instant_query_result =
+    let mut instant_query_result =
         serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
+    // Sort the results before comparing
+    if let PrometheusResponse::PromData(PromData {
+        result: PromQueryResult::Vector(ref mut vector),
+        ..
+    }) = &mut instant_query_result.data
+    {
+        vector.sort_by(|a, b| a.metric.get("k").cmp(&b.metric.get("k")));
+    }
     let expected = PrometheusJsonResponse {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
@@ -710,7 +718,15 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .unwrap()
         .into_inner()
         .body;
-    let range_query_result = serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
+    let mut range_query_result = serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
+    // Sort the results before comparing
+    if let PrometheusResponse::PromData(PromData {
+        result: PromQueryResult::Matrix(ref mut matrix),
+        ..
+    }) = &mut range_query_result.data
+    {
+        matrix.sort_by(|a, b| a.metric.get("k").cmp(&b.metric.get("k")));
+    }    
     let expected = PrometheusJsonResponse {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
@@ -762,7 +778,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .unwrap()
         .into_inner()
         .body;
-    let range_query_result = serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
+    let range_query_result = serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap(); 
     let expected = PrometheusJsonResponse {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
