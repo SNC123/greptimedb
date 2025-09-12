@@ -108,6 +108,11 @@ impl WriteCache {
         self.puffin_manager_factory.build(store, path_provider)
     }
 
+    /// Returns the intermediate manager of the write cache.
+    pub(crate) fn intermediate_manager(&self) -> IntermediateManager {
+        self.intermediate_manager.clone()
+    }
+
     /// Writes SST to the cache and then uploads it to the remote object store.
     pub(crate) async fn write_and_upload_sst(
         &self,
