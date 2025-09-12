@@ -381,7 +381,7 @@ impl FileHandle {
     pub fn level(&self) -> Level {
         self.inner.meta.level
     }
-    
+
     pub fn is_deleted(&self) -> bool {
         self.inner.deleted.load(Ordering::Relaxed)
     }
