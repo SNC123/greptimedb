@@ -351,6 +351,20 @@ impl MitoEngine {
         self.inner.workers.get_region(region_id)
     }
 
+    // /// Rebuild all inconsistent index files manually for sst files in region.
+    // pub async fn rebuild_index(&self, region_id: RegionId) -> Result<()> {
+    //     let request = WorkerRequest::BuildIndexRegion(RegionBuildIndexRequest {
+    //         region_id,
+    //         build_type: IndexBuildType::Manual,
+    //         file_metas: Vec::new(),
+    //     });
+    //     self.inner
+    //         .workers
+    //         .submit_to_worker(region_id, request)
+    //         .await?;
+    //     Ok(())
+    // }    
+
     fn encode_manifest_info_to_extensions(
         region_id: &RegionId,
         manifest_info: RegionManifestInfo,

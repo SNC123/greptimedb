@@ -45,7 +45,7 @@ impl FunctionState {
         use session::context::QueryContextRef;
         use store_api::storage::RegionId;
         use table::requests::{
-            CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest,
+            BuildIndexTableRequest, CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest
         };
 
         use crate::handlers::{FlowServiceHandler, ProcedureServiceHandler, TableMutationHandler};
@@ -120,6 +120,14 @@ impl FunctionState {
             async fn compact(
                 &self,
                 _request: CompactTableRequest,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
+
+            async fn build_index(
+                &self,
+                _request: BuildIndexTableRequest,
                 _ctx: QueryContextRef,
             ) -> Result<AffectedRows> {
                 Ok(ROWS)

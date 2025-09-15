@@ -18,14 +18,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
-use store_api::region_request::PathType;
+use store_api::region_request::{PathType, RegionBuildIndexRequest};
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
 use crate::access_layer::OperationType;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegionRef, RegionLeaderState};
-use crate::request::{IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
+use crate::request::{BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, OptionOutputTx};
 use crate::sst::file::{FileHandle, FileId, RegionFileId};
 use crate::sst::index::{IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl};
 use crate::sst::location::{self};
@@ -81,7 +81,22 @@ impl<S> RegionWorkerLoop<S> {
         }
     }
 
-    pub(crate) async fn handle_rebuild_index(&mut self, request: RegionBuildIndexRequest) {
+    /// Handles manual build index requests.
+    pub(crate) async fn handle_build_index_request(
+        &mut self,
+        region_id: RegionId,
+        _req: RegionBuildIndexRequest,
+        mut _sender: OptionOutputTx,
+    ) {
+        self.handle_rebuild_index(BuildIndexRequest {
+            region_id,
+            build_type: IndexBuildType::Manual,
+            file_metas: Vec::new(),
+        })
+        .await;
+    }
+
+    pub(crate) async fn handle_rebuild_index(&mut self, request: BuildIndexRequest) {
         let region_id = request.region_id;
         let Some(region) = self.regions.get_region(region_id) else {
             return;
@@ -99,7 +114,20 @@ impl<S> RegionWorkerLoop<S> {
             .collect();
 
         let build_tasks = if request.file_metas.is_empty() {
-            all_files.values().cloned().collect::<Vec<_>>()
+            if request.build_type == IndexBuildType::Manual {
+                all_files
+                    .values()
+                    // Find all files whose index is inconsistent with the region metadata.
+                    .filter(|file| {
+                        !file
+                            .meta_ref()
+                            .is_index_consistent_with_region(&version.metadata.column_metadatas)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                all_files.values().cloned().collect::<Vec<_>>()
+            }
         } else {
             request
                 .file_metas

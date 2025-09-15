@@ -49,6 +49,8 @@ pub enum RegionMetaAction {
 pub struct RegionChange {
     /// The metadata after changed.
     pub metadata: RegionMetadataRef,
+    /// Used for index rebuild.
+    pub is_index_changed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

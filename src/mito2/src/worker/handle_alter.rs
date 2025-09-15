@@ -146,6 +146,15 @@ impl<S> RegionWorkerLoop<S> {
         request: RegionAlterRequest,
         sender: OptionOutputTx,
     ) {
+        let is_index_changed = match request.kind.clone() {
+            AlterKind::SetIndexes { options: _ }
+            | AlterKind::UnsetIndexes { options: _ }
+            | AlterKind::AddColumns { columns: _ }
+            | AlterKind::DropColumns { names: _ }
+            | AlterKind::ModifyColumnTypes { columns: _ } => true,
+            _ => false,
+        };
+
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -154,7 +163,10 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
         // Persist the metadata to region's manifest.
-        let change = RegionChange { metadata: new_meta };
+        let change = RegionChange {
+            metadata: new_meta,
+            is_index_changed,
+        };
         self.handle_manifest_region_change(region, change, sender)
     }
 

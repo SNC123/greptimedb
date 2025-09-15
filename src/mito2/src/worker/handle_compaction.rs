@@ -20,7 +20,8 @@ use store_api::storage::RegionId;
 use crate::error::RegionNotFoundSnafu;
 use crate::metrics::COMPACTION_REQUEST_COUNT;
 use crate::region::MitoRegionRef;
-use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
+use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx, BuildIndexRequest};
+use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -80,8 +81,20 @@ impl<S> RegionWorkerLoop<S> {
             region.file_purger.clone(),
         );
 
+        let index_build_file_metas = request.edit.files_to_add.clone();
+
         // compaction finished.
         request.on_success();
+
+        // Create indexes after compact if new files are created.
+        if !index_build_file_metas.is_empty() {            
+            self.handle_rebuild_index(BuildIndexRequest {
+                region_id,
+                build_type: IndexBuildType::Compact,
+                file_metas: index_build_file_metas,
+            })
+            .await;
+        }
 
         // Schedule next compaction if necessary.
         self.compaction_scheduler

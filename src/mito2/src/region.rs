@@ -443,6 +443,7 @@ impl MitoRegion {
             if manifest_meta.partition_expr.is_none() && current_meta.partition_expr.is_some() {
                 let action = RegionMetaAction::Change(RegionChange {
                     metadata: current_meta.clone(),
+                    is_index_changed: false,
                 });
                 let result = manager
                     .update(

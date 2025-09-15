@@ -33,9 +33,9 @@ use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::version::VersionBuilder;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
-    BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
-    RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, OptionOutputTx, BuildIndexRequest, RegionChangeResult, RegionEditRequest, RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime
 };
+use crate::sst::index::IndexBuildType;
 use crate::sst::location;
 use crate::worker::{RegionWorkerLoop, WorkerListener};
 
@@ -115,6 +115,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region.switch_state_to_writable(RegionLeaderState::Altering);
         // Sends the result.
         change_result.sender.send(change_result.result.map(|_| 0));
+
+        // Rebuild index after index metadata changed.
+        if change_result.is_index_changed {
+            self.handle_rebuild_index(BuildIndexRequest {
+                region_id: region.region_id,
+                build_type: IndexBuildType::SchemaChange,
+                file_metas: Vec::new(),
+            }).await;
+        }
 
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&change_result.region_id)
@@ -348,6 +357,7 @@ impl<S> RegionWorkerLoop<S> {
         // Now the region is in altering state.
         common_runtime::spawn_global(async move {
             let new_meta = change.metadata.clone();
+            let is_index_changed = change.is_index_changed;
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
 
             let result = region
@@ -362,6 +372,7 @@ impl<S> RegionWorkerLoop<S> {
                     sender,
                     result,
                     new_meta,
+                    is_index_changed
                 }),
             };
             listener

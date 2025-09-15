@@ -175,6 +175,7 @@ impl RegionManifestManager {
             version,
             RegionChange {
                 metadata: metadata.clone(),
+                is_index_changed: true,
             },
         );
         let manifest = manifest_builder.try_build()?;
@@ -185,7 +186,10 @@ impl RegionManifestManager {
             options.manifest_dir, manifest
         );
 
-        let mut actions = vec![RegionMetaAction::Change(RegionChange { metadata })];
+        let mut actions = vec![RegionMetaAction::Change(RegionChange { 
+            metadata,
+            is_index_changed: true,
+        })];
         if flushed_entry_id > 0 {
             actions.push(RegionMetaAction::Edit(RegionEdit {
                 files_to_add: vec![],
@@ -791,6 +795,7 @@ mod test {
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
+                is_index_changed: false,
             }));
 
         let current_version = manager
@@ -859,6 +864,7 @@ mod test {
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
+                is_index_changed: false,
             }));
 
         let current_version = manager

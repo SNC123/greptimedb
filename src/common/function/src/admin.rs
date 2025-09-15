@@ -15,6 +15,7 @@
 mod add_region_follower;
 mod flush_compact_region;
 mod flush_compact_table;
+mod build_index_table;
 mod migrate_region;
 mod reconcile_catalog;
 mod reconcile_database;
@@ -30,6 +31,7 @@ use reconcile_database::ReconcileDatabaseFunction;
 use reconcile_table::ReconcileTableFunction;
 use remove_region_follower::RemoveRegionFollowerFunction;
 
+use crate::admin::build_index_table::BuildIndexFunction;
 use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
 
@@ -46,6 +48,7 @@ impl AdminFunction {
         registry.register(CompactRegionFunction::factory());
         registry.register(FlushTableFunction::factory());
         registry.register(CompactTableFunction::factory());
+        registry.register(BuildIndexFunction::factory());
         registry.register(FlushFlowFunction::factory());
         registry.register(ReconcileCatalogFunction::factory());
         registry.register(ReconcileDatabaseFunction::factory());
