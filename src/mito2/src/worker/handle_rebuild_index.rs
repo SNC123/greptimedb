@@ -17,17 +17,21 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::AffectedRows;
 use common_telemetry::{debug, warn};
 use store_api::region_request::{PathType, RegionBuildIndexRequest};
 use store_api::storage::RegionId;
-use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 
+use crate::error::Result;
 use crate::access_layer::OperationType;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegionRef, RegionLeaderState};
 use crate::request::{BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, OptionOutputTx};
 use crate::sst::file::{FileHandle, FileId, RegionFileId};
-use crate::sst::index::{IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl};
+use crate::sst::index::{
+    IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
+};
 use crate::sst::location::{self};
 use crate::sst::parquet::WriteOptions;
 use crate::worker::RegionWorkerLoop;
@@ -38,7 +42,7 @@ impl<S> RegionWorkerLoop<S> {
         region: &MitoRegionRef,
         file: FileHandle,
         build_type: IndexBuildType,
-        result_sender: Option<oneshot::Sender<IndexBuildOutcome>>,
+        result_sender: ResultMpscSender,
     ) -> IndexBuildTask {
         let version = region.version();
         let access_layer = region.access_layer.clone();
@@ -77,7 +81,7 @@ impl<S> RegionWorkerLoop<S> {
             file_purger: file.file_purger(),
             request_sender: self.sender.clone(),
             indexer_builder: indexer_builder_ref.clone(),
-            result_sender,
+            sender: result_sender,
         }
     }
 
@@ -86,17 +90,29 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         _req: RegionBuildIndexRequest,
-        mut _sender: OptionOutputTx,
+        sender: OptionOutputTx,
     ) {
-        self.handle_rebuild_index(BuildIndexRequest {
-            region_id,
-            build_type: IndexBuildType::Manual,
-            file_metas: Vec::new(),
-        })
+        debug!("Handling build index request for region {}", region_id);
+        self.handle_rebuild_index(
+            BuildIndexRequest {
+                region_id,
+                build_type: IndexBuildType::Manual,
+                file_metas: Vec::new(),
+            },
+            sender,
+        )
         .await;
     }
 
-    pub(crate) async fn handle_rebuild_index(&mut self, request: BuildIndexRequest) {
+    pub(crate) async fn handle_rebuild_index(
+        &mut self,
+        request: BuildIndexRequest,
+        sender: OptionOutputTx,
+    ) {
+        debug!(
+            "Handling rebuild index request for region {}, request: {:?}",
+            request.region_id, request
+        );
         let region_id = request.region_id;
         let Some(region) = self.regions.get_region(region_id) else {
             return;
@@ -136,16 +152,46 @@ impl<S> RegionWorkerLoop<S> {
                 .collect::<Vec<_>>()
         };
 
-        for file_handle in build_tasks {
-            let _ = self
-                .index_build_scheduler
-                .schedule_build(self.new_index_build_task(
-                    &region,
-                    file_handle,
-                    request.build_type.clone(),
-                    None,
-                ));
+        if build_tasks.is_empty() {
+            debug!(
+                "No files need to build index for region {}, request: {:?}",
+                region_id, request
+            );
+            sender.send(Ok(0));
+            return;
         }
+
+        let num_tasks = build_tasks.len();
+        let (tx, mut rx) = mpsc::channel::<Result<IndexBuildOutcome>>(num_tasks);
+
+        for file_handle in build_tasks {
+            debug!(
+                "Scheduling index build for region {}, file_id {}",
+                region_id,
+                file_handle.meta_ref().file_id
+            );
+            let task = self.new_index_build_task(
+                &region,
+                file_handle.clone(),
+                request.build_type.clone(),
+                ResultMpscSender::new(tx.clone()),
+            );
+            let _ = self.index_build_scheduler.schedule_build(task);
+        }
+
+        // Wait for all index build tasks to finish and notify the caller.
+        common_runtime::spawn_global(async move {
+            for _ in 0..num_tasks {
+                if let Some(res) = rx.recv().await {
+                    if let Err(e) = res {
+                        warn!(e; "Index build task failed for region: {}", region_id);
+                        sender.send(Err(e));
+                        return;
+                    }
+                }
+            }
+            sender.send(Ok(0));
+        });
     }
 
     pub(crate) async fn handle_index_build_finished(
@@ -153,6 +199,10 @@ impl<S> RegionWorkerLoop<S> {
         region_id: RegionId,
         request: IndexBuildFinished,
     ) {
+        debug!(
+            "Handling index build finished for region {}, request: {:?}",
+            region_id, request
+        );
         let region = match self.regions.get_region(region_id) {
             Some(region) => region,
             None => {

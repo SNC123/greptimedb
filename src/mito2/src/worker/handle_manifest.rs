@@ -33,7 +33,8 @@ use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::version::VersionBuilder;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
-    BackgroundNotify, OptionOutputTx, BuildIndexRequest, RegionChangeResult, RegionEditRequest, RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime
+    BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
+    RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::location;
@@ -118,11 +119,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Rebuild index after index metadata changed.
         if change_result.is_index_changed {
-            self.handle_rebuild_index(BuildIndexRequest {
-                region_id: region.region_id,
-                build_type: IndexBuildType::SchemaChange,
-                file_metas: Vec::new(),
-            }).await;
+            self.handle_rebuild_index(
+                BuildIndexRequest {
+                    region_id: region.region_id,
+                    build_type: IndexBuildType::SchemaChange,
+                    file_metas: Vec::new(),
+                },
+                OptionOutputTx::new(None),
+            )
+            .await;
         }
 
         // Handles the stalled requests.
@@ -372,7 +377,7 @@ impl<S> RegionWorkerLoop<S> {
                     sender,
                     result,
                     new_meta,
-                    is_index_changed
+                    is_index_changed,
                 }),
             };
             listener

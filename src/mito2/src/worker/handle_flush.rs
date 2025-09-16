@@ -26,7 +26,7 @@ use crate::config::MitoConfig;
 use crate::error::{RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
-use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx, BuildIndexRequest};
+use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
@@ -252,11 +252,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         request.on_success();
 
         // Create indexes after flush.
-        self.handle_rebuild_index(BuildIndexRequest {
-            region_id,
-            build_type: IndexBuildType::Flush,
-            file_metas: index_build_file_metas,
-        })
+        self.handle_rebuild_index(
+            BuildIndexRequest {
+                region_id,
+                build_type: IndexBuildType::Flush,
+                file_metas: index_build_file_metas,
+            },
+            OptionOutputTx::new(None),
+        )
         .await;
 
         // Handle pending requests for the region.

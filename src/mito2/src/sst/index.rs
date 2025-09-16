@@ -26,28 +26,35 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use bloom_filter::creator::BloomFilterIndexer;
+use common_base::AffectedRows;
 use common_telemetry::{debug, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
+use snafu::ResultExt;
 use statistics::{ByteCount, RowCount};
 use store_api::logstore::EntryId;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, RegionId, SequenceNumber};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::write_cache::{UploadTracker, WriteCacheRef};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
-use crate::error::Result;
+use crate::error::{BuildIndexAsyncSnafu, Error, Result};
 use crate::manifest::action::RegionEdit;
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::{Batch, BatchReader};
 use crate::region::options::IndexOptions;
-use crate::request::{BackgroundNotify, IndexBuildFinished, WorkerRequest, WorkerRequestWithTime};
+use crate::request::{
+    BackgroundNotify, IndexBuildFinished, OptionOutputTx, OutputTx, WorkerRequest,
+    WorkerRequestWithTime,
+};
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{ColumnIndexMetadata, FileHandle, FileId, FileMeta, IndexType, IndexTypes, RegionFileId};
+use crate::sst::file::{
+    ColumnIndexMetadata, FileHandle, FileId, FileMeta, IndexType, IndexTypes, RegionFileId,
+};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -439,11 +446,20 @@ pub enum IndexBuildType {
     Manual,
 }
 
-/// Outcome of an index build task.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum IndexBuildOutcome {
     Finished,
-    Aborted(String),
+    Aborted,
+}
+
+/// Mpsc output result sender.
+#[derive(Debug)]
+pub struct ResultMpscSender(Sender<Result<IndexBuildOutcome>>);
+
+impl ResultMpscSender {
+    pub fn new(tx: Sender<Result<IndexBuildOutcome>>) -> Self {
+        Self(tx)
+    }
 }
 
 pub struct IndexBuildTask {
@@ -459,12 +475,27 @@ pub struct IndexBuildTask {
     /// Otherwise, it should be built from the access layer.
     pub indexer_builder: Arc<dyn IndexerBuilder + Send + Sync>,
     /// Request sender to notify the region worker.
-    pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
-    /// Optional sender to send the result back to the caller.
-    pub result_sender: Option<oneshot::Sender<IndexBuildOutcome>>,
+    pub(crate) request_sender: Sender<WorkerRequestWithTime>,
+    /// Index build result senders.
+    pub(crate) sender: ResultMpscSender,
 }
 
 impl IndexBuildTask {
+    /// Notify the caller the job is success.
+    pub async fn on_success(&mut self, outcome: IndexBuildOutcome) {
+        self.sender.0.send(Ok(outcome)).await;
+    }
+
+    /// Send index build error to waiter.
+    pub async fn on_failure(&mut self, err: Arc<Error>) {
+        self.sender
+            .0
+            .send(Err(err.clone()).context(BuildIndexAsyncSnafu {
+                region_id: self.file_meta.region_id,
+            }))
+            .await;
+    }
+
     fn into_index_build_job(mut self) -> Job {
         Box::pin(async move {
             self.do_index_build().await;
@@ -472,18 +503,15 @@ impl IndexBuildTask {
     }
 
     async fn do_index_build(&mut self) {
-        let outcome = match self.index_build().await {
-            Ok(outcome) => outcome,
+        match self.index_build().await {
+            Ok(outcome) => self.on_success(outcome).await,
             Err(e) => {
                 warn!(
                     e; "Index build task failed, region: {}, file_id: {}",
                     self.file_meta.region_id, self.file_meta.file_id,
                 );
-                IndexBuildOutcome::Aborted(format!("Index build failed: {}", e))
+                self.on_failure(e.into()).await
             }
-        };
-        if let Some(sender) = self.result_sender.take() {
-            let _ = sender.send(outcome);
         }
     }
 
@@ -514,7 +542,16 @@ impl IndexBuildTask {
     }
 
     async fn index_build(&mut self) -> Result<IndexBuildOutcome> {
+        debug!(
+            "Starting index build for region {}",
+            self.file_meta.region_id
+        );
         let mut indexer = self.indexer_builder.build(self.file_meta.file_id).await;
+
+        // Check SST file existence before building index.
+        if !self.check_sst_file_exists().await {
+            return Ok(IndexBuildOutcome::Aborted);
+        }
 
         let mut parquet_reader = self
             .access_layer
@@ -537,7 +574,7 @@ impl IndexBuildTask {
 
             // Check SST file existence again after building index.
             if !self.check_sst_file_exists().await {
-                return Ok(IndexBuildOutcome::Aborted("SST file not found".to_string()));
+                return Ok(IndexBuildOutcome::Aborted);
             }
 
             self.file_meta.indexes = index_output.build_indexes();
@@ -626,7 +663,7 @@ impl IndexBuildScheduler {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::SemanticType;
+    use api::v1::{AffectedRows, SemanticType};
     use common_base::readable_size::ReadableSize;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{
@@ -1018,7 +1055,7 @@ mod tests {
     async fn test_index_build_task_sst_not_exist() {
         let env = SchedulerEnv::new().await;
         let (tx, _rx) = mpsc::channel(4);
-        let (result_tx, result_rx) = oneshot::channel::<IndexBuildOutcome>();
+        let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let mut scheduler = env.mock_index_build_scheduler();
         let metadata = Arc::new(sst_region_metadata());
         let region_id = metadata.region_id;
@@ -1040,13 +1077,15 @@ mod tests {
             file_purger: Arc::new(NoopFilePurger {}),
             indexer_builder,
             request_sender: tx,
-            result_sender: Some(result_tx),
+            sender: ResultMpscSender(result_tx),
         };
 
         // Schedule the build task and check result.
         scheduler.schedule_build(task).unwrap();
-        match result_rx.await.unwrap() {
-            IndexBuildOutcome::Aborted(_) => {}
+        match result_rx.recv().await.unwrap() {
+            Ok(outcome) => {
+                assert_eq!(outcome, IndexBuildOutcome::Aborted);
+            }
             _ => panic!("Expect aborted result due to missing SST file"),
         }
     }
@@ -1071,7 +1110,7 @@ mod tests {
 
         // Create mock task.
         let (tx, mut rx) = mpsc::channel(4);
-        let (result_tx, result_rx) = oneshot::channel::<IndexBuildOutcome>();
+        let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -1082,13 +1121,18 @@ mod tests {
             file_purger: Arc::new(NoopFilePurger {}),
             indexer_builder,
             request_sender: tx,
-            result_sender: Some(result_tx),
+            sender: ResultMpscSender(result_tx),
         };
 
         scheduler.schedule_build(task).unwrap();
 
         // The task should finish successfully.
-        assert_eq!(result_rx.await.unwrap(), IndexBuildOutcome::Finished);
+        match result_rx.recv().await.unwrap() {
+            Ok(outcome) => {
+                assert_eq!(outcome, IndexBuildOutcome::Finished);
+            }
+            _ => panic!("Expect finished result"),
+        }
 
         // A notification should be sent to the worker to update the manifest.
         let worker_req = rx.recv().await.unwrap().request;
@@ -1129,7 +1173,7 @@ mod tests {
 
         // Create mock task.
         let (tx, _rx) = mpsc::channel(4);
-        let (result_tx, result_rx) = oneshot::channel::<IndexBuildOutcome>();
+        let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -1140,7 +1184,7 @@ mod tests {
             file_purger: Arc::new(NoopFilePurger {}),
             indexer_builder,
             request_sender: tx,
-            result_sender: Some(result_tx),
+            sender: ResultMpscSender(result_tx),
         };
 
         scheduler.schedule_build(task).unwrap();
@@ -1172,7 +1216,12 @@ mod tests {
         }
 
         // The task should finish successfully.
-        assert_eq!(result_rx.await.unwrap(), IndexBuildOutcome::Finished);
+        match result_rx.recv().await.unwrap() {
+            Ok(outcome) => {
+                assert_eq!(outcome, IndexBuildOutcome::Finished);
+            }
+            _ => panic!("Expect finished result"),
+        }
 
         // The index file should exist after the task finishes.
         assert!(
@@ -1216,7 +1265,7 @@ mod tests {
 
         // Create mock task.
         let (tx, mut rx) = mpsc::channel(4);
-        let (result_tx, result_rx) = oneshot::channel::<IndexBuildOutcome>();
+        let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -1227,13 +1276,18 @@ mod tests {
             file_purger: Arc::new(NoopFilePurger {}),
             indexer_builder,
             request_sender: tx,
-            result_sender: Some(result_tx),
+            sender: ResultMpscSender(result_tx),
         };
 
         scheduler.schedule_build(task).unwrap();
 
         // The task should finish successfully.
-        assert_eq!(result_rx.await.unwrap(), IndexBuildOutcome::Finished);
+        match result_rx.recv().await.unwrap() {
+            Ok(outcome) => {
+                assert_eq!(outcome, IndexBuildOutcome::Finished);
+            }
+            _ => panic!("Expect finished result"),
+        }
 
         // No index is built, so no notification should be sent to the worker.
         let _ = rx.recv().await.is_none();
@@ -1287,7 +1341,7 @@ mod tests {
 
         // Create mock task.
         let (tx, mut _rx) = mpsc::channel(4);
-        let (result_tx, result_rx) = oneshot::channel::<IndexBuildOutcome>();
+        let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -1298,13 +1352,18 @@ mod tests {
             file_purger: Arc::new(NoopFilePurger {}),
             indexer_builder,
             request_sender: tx,
-            result_sender: Some(result_tx),
+            sender: ResultMpscSender(result_tx),
         };
 
         scheduler.schedule_build(task).unwrap();
 
         // The task should finish successfully.
-        assert_eq!(result_rx.await.unwrap(), IndexBuildOutcome::Finished);
+        match result_rx.recv().await.unwrap() {
+            Ok(outcome) => {
+                assert_eq!(outcome, IndexBuildOutcome::Finished);
+            }
+            _ => panic!("Expect finished result"),
+        }
 
         // The write cache should contain the uploaded index file.
         let index_key = IndexKey::new(region_id, file_meta.file_id, FileType::Puffin);

@@ -22,7 +22,8 @@ use common_catalog::build_db_string;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{error, info};
+use common_telemetry::tracing_subscriber::field::debug;
+use common_telemetry::{debug, error, info};
 use futures_util::future;
 use partition::manager::{PartitionInfo, PartitionRuleManagerRef};
 use session::context::QueryContextRef;
@@ -98,6 +99,7 @@ impl Requester {
         request: BuildIndexTableRequest,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
+        debug!(?request, "Handling build index request");
         let partitions = self
             .get_table_partitions(
                 &request.catalog_name,
@@ -196,6 +198,7 @@ impl Requester {
         db_string: Option<String>,
         ctx: &QueryContextRef,
     ) -> Result<AffectedRows> {
+        debug!("Do region requests: {:?}", requests);
         let request_factory = RegionRequestFactory::new(RegionRequestHeader {
             tracing_context: TracingContext::from_current_span().to_w3c(),
             dbname: db_string.unwrap_or_else(|| ctx.get_db_string()),
@@ -234,6 +237,7 @@ impl Requester {
         let region_id = match req {
             RegionRequestBody::Flush(req) => req.region_id,
             RegionRequestBody::Compact(req) => req.region_id,
+            RegionRequestBody::BuildIndex(req) => req.region_id,
             _ => {
                 error!("Unsupported region request: {:?}", req);
                 return UnsupportedRegionRequestSnafu {}.fail();
