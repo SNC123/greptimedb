@@ -412,6 +412,7 @@ impl Compactor for DefaultCompactor {
                         time_range: sst_info.time_range,
                         level: output.output_level,
                         file_size: sst_info.file_size,
+                        available_indexes: sst_info.index_metadata.build_available_indexes(),
                         indexes: sst_info.index_metadata.build_indexes(),
                         index_file_size: sst_info.index_metadata.file_size,
                         num_rows: sst_info.num_rows as u64,

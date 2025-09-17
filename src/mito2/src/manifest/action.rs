@@ -49,7 +49,12 @@ pub enum RegionMetaAction {
 pub struct RegionChange {
     /// The metadata after changed.
     pub metadata: RegionMetadataRef,
+    /// A flag indicates whether the index has been changed.
+    /// 
+    /// For backward compatibility, this field is default to `false` when
+    /// deserializing from old manifest.
     /// Used for index rebuild.
+    #[serde(default)]
     pub is_index_changed: bool,
 }
 

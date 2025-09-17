@@ -190,6 +190,8 @@ pub struct FileMeta {
     pub level: Level,
     /// Size of the file.
     pub file_size: u64,
+    /// Available indexes of the file.
+    pub available_indexes: IndexTypes,
     /// Created indexes of the file for each column.
     pub indexes: Vec<ColumnIndexMetadata>,
     /// Size of the index file.
@@ -243,7 +245,8 @@ impl Debug for FileMeta {
             .field("file_size", &ReadableSize(self.file_size));
         if !self.indexes.is_empty() {
             debug_struct
-                .field("available_indexes", &self.indexes)
+                .field("available_indexes", &self.available_indexes)
+                .field("indexes", &self.indexes)
                 .field("index_file_size", &ReadableSize(self.index_file_size));
         }
         debug_struct
@@ -282,37 +285,23 @@ pub struct ColumnIndexMetadata {
 
 impl FileMeta {
     pub fn exists_index(&self) -> bool {
-        !self.indexes.is_empty()
+        !self.available_indexes.is_empty()
     }
 
     /// Returns true if the file has an inverted index
     pub fn inverted_index_available(&self) -> bool {
-        for index in &self.indexes {
-            if index.created_indexes.contains(&IndexType::InvertedIndex) {
-                return true;
-            }
-        }
-        false
+        self.available_indexes.contains(&IndexType::InvertedIndex)
     }
 
     /// Returns true if the file has a fulltext index
     pub fn fulltext_index_available(&self) -> bool {
-        for index in &self.indexes {
-            if index.created_indexes.contains(&IndexType::FulltextIndex) {
-                return true;
-            }
-        }
-        false
+        self.available_indexes.contains(&IndexType::FulltextIndex)
     }
 
     /// Returns true if the file has a bloom filter index.
     pub fn bloom_filter_index_available(&self) -> bool {
-        for index in &self.indexes {
-            if index.created_indexes.contains(&IndexType::BloomFilterIndex) {
-                return true;
-            }
-        }
-        false
+        self.available_indexes
+            .contains(&IndexType::BloomFilterIndex)
     }
 
     pub fn index_file_size(&self) -> u64 {
@@ -513,6 +502,7 @@ mod tests {
             time_range: FileTimeRange::default(),
             level,
             file_size: 0,
+            available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             indexes: vec![ColumnIndexMetadata {
                 column_id: 0,
                 created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
@@ -537,7 +527,7 @@ mod tests {
     fn test_deserialize_from_string() {
         let json_file_meta = "{\"region_id\":0,\"file_id\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55\",\
         \"time_range\":[{\"value\":0,\"unit\":\"Millisecond\"},{\"value\":0,\"unit\":\"Millisecond\"}],\
-        \"indexes\":[{\"column_id\":0,\"created_indexes:\":\"InvertedIndex\"}]],\"level\":0}";
+        \"available_indexes\":[\"InvertedIndex\"],\"indexes\":[{\"column_id\": 0, \"created_indexes\": [\"InvertedIndex\"]}],\"level\":0}";
         let file_meta = create_file_meta(
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
             0,
@@ -561,6 +551,7 @@ mod tests {
             time_range: FileTimeRange::default(),
             level: 0,
             file_size: 0,
+            available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             indexes: vec![ColumnIndexMetadata {
                 column_id: 0,
                 created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
