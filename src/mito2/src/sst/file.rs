@@ -193,6 +193,14 @@ pub struct FileMeta {
     /// Available indexes of the file.
     pub available_indexes: IndexTypes,
     /// Created indexes of the file for each column.
+    /// 
+    /// This is essentially a more granular, column-level version of `available_indexes`,
+    /// primarily used for manual index building in the asynchronous index construction mode.
+    ///
+    /// For backward compatibility, older `FileMeta` versions might only contain `available_indexes`.
+    /// In such cases, we cannot deduce specific column index information from `available_indexes` alone.
+    /// Therefore, defaulting this `indexes` field to an empty list during deserialization is a
+    /// reasonable and necessary step to ensure column information consistency.
     pub indexes: Vec<ColumnIndexMetadata>,
     /// Size of the index file.
     pub index_file_size: u64,

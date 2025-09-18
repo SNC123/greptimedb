@@ -576,7 +576,7 @@ impl IndexBuildTask {
             if !self.check_sst_file_exists().await {
                 return Ok(IndexBuildOutcome::Aborted);
             }
-
+            self.file_meta.available_indexes = index_output.build_available_indexes();
             self.file_meta.indexes = index_output.build_indexes();
             self.file_meta.index_file_size = index_output.file_size;
             let edit = RegionEdit {
