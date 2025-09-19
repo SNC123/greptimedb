@@ -230,7 +230,7 @@ pub trait IndexerBuilder {
 }
 #[derive(Clone)]
 pub(crate) struct IndexerBuilderImpl {
-    pub(crate) op_type: OperationType,
+    pub(crate) build_type: IndexBuildType,
     pub(crate) metadata: RegionMetadataRef,
     pub(crate) row_group_size: usize,
     pub(crate) puffin_manager: SstPuffinManager,
@@ -270,9 +270,10 @@ impl IndexerBuilder for IndexerBuilderImpl {
 
 impl IndexerBuilderImpl {
     fn build_inverted_indexer(&self, file_id: FileId) -> Option<InvertedIndexer> {
-        let create = match self.op_type {
-            OperationType::Flush => self.inverted_index_config.create_on_flush.auto(),
-            OperationType::Compact => self.inverted_index_config.create_on_compaction.auto(),
+        let create = match self.build_type {
+            IndexBuildType::Flush => self.inverted_index_config.create_on_flush.auto(),
+            IndexBuildType::Compact => self.inverted_index_config.create_on_compaction.auto(),
+            _ => true,
         };
 
         if !create {
@@ -330,9 +331,10 @@ impl IndexerBuilderImpl {
     }
 
     async fn build_fulltext_indexer(&self, file_id: FileId) -> Option<FulltextIndexer> {
-        let create = match self.op_type {
-            OperationType::Flush => self.fulltext_index_config.create_on_flush.auto(),
-            OperationType::Compact => self.fulltext_index_config.create_on_compaction.auto(),
+        let create = match self.build_type {
+            IndexBuildType::Flush => self.fulltext_index_config.create_on_flush.auto(),
+            IndexBuildType::Compact => self.fulltext_index_config.create_on_compaction.auto(),
+            _ => true,
         };
 
         if !create {
@@ -383,9 +385,10 @@ impl IndexerBuilderImpl {
     }
 
     fn build_bloom_filter_indexer(&self, file_id: FileId) -> Option<BloomFilterIndexer> {
-        let create = match self.op_type {
-            OperationType::Flush => self.bloom_filter_index_config.create_on_flush.auto(),
-            OperationType::Compact => self.bloom_filter_index_config.create_on_compaction.auto(),
+        let create = match self.build_type {
+            IndexBuildType::Flush => self.bloom_filter_index_config.create_on_flush.auto(),
+            IndexBuildType::Compact => self.bloom_filter_index_config.create_on_compaction.auto(),
+            _ => true,
         };
 
         if !create {
@@ -444,6 +447,15 @@ pub enum IndexBuildType {
     Compact,
     /// Manually build index.
     Manual,
+}
+
+impl From<OperationType> for IndexBuildType {
+    fn from(op_type: OperationType) -> Self {
+        match op_type {
+            OperationType::Flush => IndexBuildType::Flush,
+            OperationType::Compact => IndexBuildType::Compact,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -672,6 +684,7 @@ mod tests {
     use object_store::ObjectStore;
     use object_store::services::Memory;
     use puffin_manager::PuffinManagerFactory;
+    use serde_json::value::Index;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use tokio::sync::{mpsc, oneshot};
 
@@ -830,7 +843,7 @@ mod tests {
             ),
         );
         Arc::new(IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata,
             row_group_size: 1024,
             puffin_manager,
@@ -854,7 +867,7 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -884,7 +897,7 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -905,7 +918,7 @@ mod tests {
         assert!(indexer.bloom_filter_indexer.is_some());
 
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Compact,
+            build_type: IndexBuildType::Compact,
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -926,7 +939,7 @@ mod tests {
         assert!(indexer.bloom_filter_indexer.is_some());
 
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Compact,
+            build_type: IndexBuildType::Compact,
             metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -959,7 +972,7 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -982,7 +995,7 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -1005,7 +1018,7 @@ mod tests {
             with_skipping_bloom: false,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -1035,7 +1048,7 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata,
             row_group_size: 0,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
@@ -1317,7 +1330,7 @@ mod tests {
         );
         // Indexer builder built from write cache.
         let indexer_builder = Arc::new(IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: write_cache.build_puffin_manager().clone(),

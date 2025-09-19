@@ -60,7 +60,7 @@ impl<S> RegionWorkerLoop<S> {
         };
 
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
-            op_type: OperationType::Flush, //TODO(SNC123): Temporarily set to Flush, 4 BuildTypes will be introduced later.
+            build_type: build_type.clone(),
             metadata: version.metadata.clone(),
             inverted_index_config: self.config.inverted_index.clone(),
             fulltext_index_config: self.config.fulltext_index.clone(),
