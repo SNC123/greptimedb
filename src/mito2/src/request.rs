@@ -931,7 +931,7 @@ pub(crate) struct RegionChangeResult {
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
     /// Used for index build in schema change.
-    pub(crate) is_index_changed: bool,
+    pub(crate) need_index: bool,
 }
 
 /// Request to edit a region directly.

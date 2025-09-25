@@ -22,7 +22,10 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    alter_request, compact_request, region_request, truncate_request, AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest
+    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CloseRequest,
+    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
+    FlushRequest, InsertRequests, OpenRequest, TruncateRequest, alter_request, compact_request,
+    region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -348,9 +351,7 @@ fn make_region_build_index(index: BuildIndexRequest) -> Result<Vec<(RegionId, Re
     let region_id = index.region_id.into();
     Ok(vec![(
         region_id,
-        RegionRequest::BuildIndex(RegionBuildIndexRequest {
-            index_id: 0,
-        }),
+        RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
     )])
 }
 
@@ -1354,9 +1355,7 @@ impl Default for RegionCompactRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct RegionBuildIndexRequest {
-    pub index_id: u32, // to check: unused
-}
+pub struct RegionBuildIndexRequest {}
 
 /// Truncate region request.
 #[derive(Debug)]

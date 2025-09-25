@@ -118,7 +118,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         change_result.sender.send(change_result.result.map(|_| 0));
 
         // Rebuild index after index metadata changed.
-        if change_result.is_index_changed {
+        if change_result.need_index {
             self.handle_rebuild_index(
                 BuildIndexRequest {
                     region_id: region.region_id,
@@ -362,7 +362,7 @@ impl<S> RegionWorkerLoop<S> {
         // Now the region is in altering state.
         common_runtime::spawn_global(async move {
             let new_meta = change.metadata.clone();
-            let is_index_changed = change.is_index_changed;
+            let need_index = change.need_index;
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
 
             let result = region
@@ -377,7 +377,7 @@ impl<S> RegionWorkerLoop<S> {
                     sender,
                     result,
                     new_meta,
-                    is_index_changed,
+                    need_index,
                 }),
             };
             listener

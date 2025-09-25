@@ -17,6 +17,7 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use api::v1::DropColumns;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
@@ -146,15 +147,7 @@ impl<S> RegionWorkerLoop<S> {
         request: RegionAlterRequest,
         sender: OptionOutputTx,
     ) {
-        let is_index_changed = match request.kind.clone() {
-            AlterKind::SetIndexes { options: _ }
-            | AlterKind::UnsetIndexes { options: _ }
-            | AlterKind::AddColumns { columns: _ }
-            | AlterKind::DropColumns { names: _ }
-            | AlterKind::ModifyColumnTypes { columns: _ } => true,
-            _ => false,
-        };
-
+        let need_index = can_fast_path_index(&request.kind);
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -165,7 +158,7 @@ impl<S> RegionWorkerLoop<S> {
         // Persist the metadata to region's manifest.
         let change = RegionChange {
             metadata: new_meta,
-            is_index_changed,
+            need_index,
         };
         self.handle_manifest_region_change(region, change, sender)
     }
@@ -288,4 +281,17 @@ fn log_option_update<T: std::fmt::Debug>(
         "Update region {}: {}, previous: {:?}, new: {:?}",
         option_name, region_id, prev_value, cur_value
     );
+}
+
+/// Used to determine whether we can build index directly after schema change.
+fn can_fast_path_index(kind: &AlterKind) -> bool {
+    match kind {
+        // `SetIndexes` is a fast-path operation because it can build indexes for existing SSTs
+        // in the background, without needing to wait for a flush or compaction cycle.
+        AlterKind::SetIndexes { options: _ } => true,
+        // For AddColumns, DropColumns, UnsetIndexes and ModifyColumnTypes, we don't treat them as index changes.
+        // Index files still need to be rebuilt after schema changes,
+        // but this will happen automatically during flush or compaction.
+        _ => false,
+    }
 }

@@ -495,12 +495,12 @@ pub struct IndexBuildTask {
 impl IndexBuildTask {
     /// Notify the caller the job is success.
     pub async fn on_success(&mut self, outcome: IndexBuildOutcome) {
-        self.sender.0.send(Ok(outcome)).await;
+        let _ = self.sender.0.send(Ok(outcome)).await;
     }
 
     /// Send index build error to waiter.
     pub async fn on_failure(&mut self, err: Arc<Error>) {
-        self.sender
+        let _ = self.sender
             .0
             .send(Err(err.clone()).context(BuildIndexAsyncSnafu {
                 region_id: self.file_meta.region_id,
