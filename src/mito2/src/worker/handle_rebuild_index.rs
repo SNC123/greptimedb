@@ -24,7 +24,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
 use crate::access_layer::OperationType;
-use crate::engine::listener;
+// use crate::engine::listener;
 use crate::error::Result;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegionRef, RegionLeaderState};
