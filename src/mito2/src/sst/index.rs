@@ -722,7 +722,11 @@ impl IndexBuildTask {
         Ok(())
     }
 
-    async fn update_manifest(&mut self, output: IndexOutput, index_file_id: FileId) -> Result<RegionEdit> {
+    async fn update_manifest(
+        &mut self,
+        output: IndexOutput,
+        index_file_id: FileId,
+    ) -> Result<RegionEdit> {
         self.file_meta.available_indexes = output.build_available_indexes();
         self.file_meta.index_file_size = output.file_size;
         self.file_meta.index_file_id = Some(index_file_id);
